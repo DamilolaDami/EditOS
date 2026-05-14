@@ -68,6 +68,9 @@ private struct ClipInspector: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            if clip.text != nil || clip.stickerSymbol != nil {
+                overlaySection
+            }
             InspectorSection(title: "Timing") {
                 InspectorRow(label: "Start", value: String(format: "%.2fs", clip.timeRange.start))
                 InspectorRow(label: "Duration", value: String(format: "%.2fs", clip.timeRange.duration))
@@ -86,6 +89,12 @@ private struct ClipInspector: View {
                     range: 0...1,
                     format: { String(format: "%.0f%%", $0 * 100) },
                     onCommit: reload
+                )
+                MuteToggleRow(
+                    isMuted: (currentClip(clip.id)?.volume ?? clip.volume) == 0,
+                    onToggle: {
+                        model.toggleClipMuted(clip.id)
+                    }
                 )
             }
             InspectorSection(title: "Transform") {
@@ -112,6 +121,77 @@ private struct ClipInspector: View {
                 )
             }
         }
+    }
+
+    @ViewBuilder
+    private var overlaySection: some View {
+        InspectorSection(title: clip.stickerSymbol != nil ? "Sticker" : "Text") {
+            if clip.text != nil {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Content")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 90, alignment: .leading)
+                    TextField("Text", text: textBinding)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+            if clip.stickerSymbol != nil {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Symbol")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 90, alignment: .leading)
+                    TextField("SF Symbol name", text: stickerBinding)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+            SliderRow(
+                label: "Size",
+                value: overlaySizeBinding,
+                range: 16...240,
+                format: { String(format: "%.0f pt", $0) },
+                onCommit: nil
+            )
+        }
+    }
+
+    private var textBinding: Binding<String> {
+        let id = clip.id
+        return Binding(
+            get: { currentClip(id)?.text ?? "" },
+            set: { newValue in
+                model.updateClip(id) { c in
+                    c.text = newValue
+                    c.label = newValue
+                }
+            }
+        )
+    }
+
+    private var stickerBinding: Binding<String> {
+        let id = clip.id
+        return Binding(
+            get: { currentClip(id)?.stickerSymbol ?? "" },
+            set: { newValue in
+                model.updateClip(id) { c in
+                    c.stickerSymbol = newValue
+                    c.label = newValue
+                }
+            }
+        )
+    }
+
+    private var overlaySizeBinding: Binding<Double> {
+        let id = clip.id
+        return Binding(
+            get: { Double(currentClip(id)?.overlaySize ?? 64) },
+            set: { newValue in
+                model.updateClip(id) { c in
+                    c.overlaySize = CGFloat(newValue)
+                }
+            }
+        )
     }
 
     private func reload() {
@@ -220,6 +300,32 @@ private struct InspectorRow: View {
                 .foregroundStyle(theme.colors.textPrimary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+private struct MuteToggleRow: View {
+    @Environment(\.theme) private var theme
+    let isMuted: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        Button(action: onToggle) {
+            HStack(spacing: theme.spacing.xs) {
+                Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                Text(isMuted ? "Unmute clip" : "Mute clip")
+                    .font(theme.typography.body)
+                Spacer()
+            }
+            .padding(.horizontal, theme.spacing.sm)
+            .padding(.vertical, theme.spacing.xs)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: theme.radius.sm)
+                    .fill(isMuted ? theme.colors.danger.opacity(0.18) : theme.colors.surface)
+            )
+            .foregroundStyle(isMuted ? theme.colors.danger : theme.colors.textPrimary)
+        }
+        .buttonStyle(.plain)
     }
 }
 

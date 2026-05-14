@@ -15,18 +15,7 @@ struct LibraryPanel: View {
             VStack(alignment: .leading, spacing: theme.spacing.sm) {
                 header
                 Divider().overlay(theme.colors.border)
-                if model.project.assets.isEmpty {
-                    emptyState
-                } else {
-                    ScrollView {
-                        LazyVGrid(columns: columns, spacing: theme.spacing.sm) {
-                            ForEach(model.project.assets) { asset in
-                                MediaAssetCell(asset: asset, model: model)
-                            }
-                        }
-                        .padding(theme.spacing.sm)
-                    }
-                }
+                content
             }
             .padding(theme.spacing.sm)
         }
@@ -40,20 +29,69 @@ struct LibraryPanel: View {
         }
     }
 
+    @ViewBuilder
+    private var content: some View {
+        switch model.selectedTool {
+        case .media:
+            mediaGrid(filter: { _ in true })
+        case .audio:
+            mediaGrid(filter: { $0.kind == .audio })
+        case .text:
+            TextLibrary(model: model)
+        case .stickers:
+            StickerLibrary(model: model)
+        case .captions:
+            TextLibrary(model: model)
+        default:
+            placeholder(for: model.selectedTool)
+        }
+    }
+
+    @ViewBuilder
+    private func mediaGrid(filter: (MediaAsset) -> Bool) -> some View {
+        let filtered = model.project.assets.filter(filter)
+        if filtered.isEmpty {
+            emptyState
+        } else {
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: theme.spacing.sm) {
+                    ForEach(filtered) { asset in
+                        MediaAssetCell(asset: asset, model: model)
+                    }
+                }
+                .padding(theme.spacing.sm)
+            }
+        }
+    }
+
+    private func placeholder(for tool: ToolCategory) -> some View {
+        VStack(spacing: theme.spacing.sm) {
+            Image(systemName: tool.systemImage)
+                .font(.system(size: 28))
+                .foregroundStyle(theme.colors.textSecondary)
+            Text("\(tool.label) — coming soon")
+                .font(theme.typography.caption)
+                .foregroundStyle(theme.colors.textSecondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     private var header: some View {
         HStack {
             Text(model.selectedTool.label)
                 .font(theme.typography.title)
                 .foregroundStyle(theme.colors.textPrimary)
             Spacer()
-            Button {
-                isImporterPresented = true
-            } label: {
-                Label("Import", systemImage: "plus")
-                    .font(theme.typography.body)
+            if model.selectedTool == .media || model.selectedTool == .audio {
+                Button {
+                    isImporterPresented = true
+                } label: {
+                    Label("Import", systemImage: "plus")
+                        .font(theme.typography.body)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(theme.colors.accent)
             }
-            .buttonStyle(.borderless)
-            .foregroundStyle(theme.colors.accent)
         }
     }
 
@@ -198,5 +236,108 @@ private struct DragPreview: View {
         }
         .frame(width: 72, height: 72)
         .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+// MARK: - Text library
+
+private struct TextLibrary: View {
+    @Environment(\.theme) private var theme
+    @Bindable var model: EditorViewModel
+
+    private struct Preset: Identifiable {
+        let id = UUID()
+        let label: String
+        let sample: String
+        let size: CGFloat
+        let weight: Font.Weight
+    }
+
+    private let presets: [Preset] = [
+        Preset(label: "Title", sample: "Title", size: 88, weight: .heavy),
+        Preset(label: "Subtitle", sample: "Subtitle", size: 56, weight: .semibold),
+        Preset(label: "Body", sample: "Body text", size: 40, weight: .regular),
+        Preset(label: "Caption", sample: "Caption", size: 28, weight: .medium)
+    ]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: theme.spacing.sm) {
+                Text("Tap a style to add it at the playhead.")
+                    .font(theme.typography.caption)
+                    .foregroundStyle(theme.colors.textSecondary)
+                ForEach(presets) { preset in
+                    Button {
+                        model.placeText(preset.sample, atTime: model.playback.currentTime)
+                    } label: {
+                        HStack {
+                            Text(preset.sample)
+                                .font(.system(size: min(preset.size * 0.45, 24), weight: preset.weight))
+                                .foregroundStyle(.white)
+                            Spacer()
+                            Text(preset.label)
+                                .font(theme.typography.caption)
+                                .foregroundStyle(theme.colors.textSecondary)
+                        }
+                        .padding(.horizontal, theme.spacing.md)
+                        .padding(.vertical, theme.spacing.sm)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: theme.radius.sm)
+                                .fill(theme.colors.surfaceElevated)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(theme.spacing.sm)
+        }
+    }
+}
+
+// MARK: - Sticker library
+
+private struct StickerLibrary: View {
+    @Environment(\.theme) private var theme
+    @Bindable var model: EditorViewModel
+
+    private let symbols: [String] = [
+        "heart.fill", "star.fill", "bolt.fill", "flame.fill", "sparkles",
+        "hand.thumbsup.fill", "hands.clap", "face.smiling.fill", "party.popper.fill",
+        "checkmark.seal.fill", "xmark.seal.fill", "exclamationmark.triangle.fill",
+        "questionmark.circle.fill", "speaker.wave.3.fill", "music.note", "camera.fill",
+        "location.fill", "moon.stars.fill", "sun.max.fill", "cloud.fill",
+        "cart.fill", "gift.fill", "bell.fill", "crown.fill"
+    ]
+
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: theme.spacing.sm) {
+                Text("Tap a sticker to drop it at the playhead.")
+                    .font(theme.typography.caption)
+                    .foregroundStyle(theme.colors.textSecondary)
+                LazyVGrid(columns: columns, spacing: theme.spacing.sm) {
+                    ForEach(symbols, id: \.self) { name in
+                        Button {
+                            model.placeSticker(name, atTime: model.playback.currentTime)
+                        } label: {
+                            Image(systemName: name)
+                                .font(.system(size: 22))
+                                .foregroundStyle(theme.colors.textPrimary)
+                                .frame(width: 44, height: 44)
+                                .background(
+                                    RoundedRectangle(cornerRadius: theme.radius.sm)
+                                        .fill(theme.colors.surfaceElevated)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .help(name)
+                    }
+                }
+            }
+            .padding(theme.spacing.sm)
+        }
     }
 }

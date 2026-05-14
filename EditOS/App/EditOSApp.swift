@@ -18,6 +18,7 @@ struct EditOSApp: App {
                 .environment(environment)
                 .frame(minWidth: 1280, minHeight: 800)
         }
+        .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
         .defaultSize(width: 1600, height: 1000)
     }

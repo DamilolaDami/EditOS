@@ -129,4 +129,15 @@ extension Track.Kind {
         case .sticker: "face.smiling"
         }
     }
+
+    /// Vertical room each track gets on the timeline. Video and audio carry
+    /// thumbnails / waveforms so they stay tall; overlay-style tracks just
+    /// hold small pill clips, so they shrink to give the player more room —
+    /// matches CapCut's hierarchy.
+    var timelineHeight: CGFloat {
+        switch self {
+        case .video, .audio: 56
+        case .overlay, .caption, .sticker: 26
+        }
+    }
 }

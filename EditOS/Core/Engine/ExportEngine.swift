@@ -30,7 +30,6 @@ actor ExportEngine {
         session.outputURL = settings.outputURL
         session.outputFileType = settings.fileType
         session.shouldOptimizeForNetworkUse = true
-        session.videoComposition = result.videoComposition
         session.audioMix = result.audioMix
 
         await session.export()

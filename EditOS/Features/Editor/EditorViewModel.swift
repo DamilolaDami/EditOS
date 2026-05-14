@@ -11,6 +11,8 @@ final class EditorViewModel {
     var isLibraryVisible: Bool = true
     var isInspectorVisible: Bool = true
     var zoom: Double = 1.0
+    /// Magnet-on/off — when off, dragging clips skips edge-snap completely.
+    var snapEnabled: Bool = true
 
     let playback: PlaybackEngine
     private let resolver: AssetResolver
@@ -88,6 +90,68 @@ final class EditorViewModel {
             relativeTo: nil
         )
         project.coverBookmark = bookmark
+    }
+
+    // MARK: - Overlay clips (text / sticker)
+
+    /// Adds a text overlay clip at `time` on the first caption track,
+    /// creating one if none exists. Default duration is 3 seconds.
+    func placeText(_ text: String, atTime time: TimeInterval, duration: TimeInterval = 3) {
+        ensureTrack(kind: .caption)
+        guard let trackIndex = project.timeline.tracks.firstIndex(where: { $0.kind == .caption }) else { return }
+        let start = freeSlotStart(in: trackIndex, preferred: max(0, time), duration: duration)
+        let clip = Clip(
+            assetID: UUID(),  // placeholder — overlay clips don't reference a real asset
+            timeRange: TimeRange(start: start, duration: duration),
+            sourceRange: TimeRange(start: 0, duration: duration),
+            label: text,
+            text: text,
+            foregroundColor: .white,
+            overlaySize: 64
+        )
+        project.timeline.tracks[trackIndex].clips.append(clip)
+        project.timeline.tracks[trackIndex].clips.sort { $0.timeRange.start < $1.timeRange.start }
+        selectedClipID = clip.id
+    }
+
+    /// Adds a sticker overlay clip — `symbol` is an SF Symbol name (e.g. "heart.fill").
+    func placeSticker(_ symbol: String, atTime time: TimeInterval, duration: TimeInterval = 3) {
+        ensureTrack(kind: .sticker)
+        guard let trackIndex = project.timeline.tracks.firstIndex(where: { $0.kind == .sticker }) else { return }
+        let start = freeSlotStart(in: trackIndex, preferred: max(0, time), duration: duration)
+        let clip = Clip(
+            assetID: UUID(),
+            timeRange: TimeRange(start: start, duration: duration),
+            sourceRange: TimeRange(start: 0, duration: duration),
+            label: symbol,
+            stickerSymbol: symbol,
+            foregroundColor: .white,
+            overlaySize: 96
+        )
+        project.timeline.tracks[trackIndex].clips.append(clip)
+        project.timeline.tracks[trackIndex].clips.sort { $0.timeRange.start < $1.timeRange.start }
+        selectedClipID = clip.id
+    }
+
+    private func ensureTrack(kind: Track.Kind) {
+        if !project.timeline.tracks.contains(where: { $0.kind == kind }) {
+            project.timeline.tracks.append(Track(kind: kind))
+        }
+    }
+
+    // MARK: - Tracks
+
+    /// Appends a new track of the given kind. Sticker / caption / overlay
+    /// tracks let the user layer multiple of the same type.
+    func addTrack(kind: Track.Kind) {
+        project.timeline.tracks.append(Track(kind: kind))
+    }
+
+    /// Remove a track and any composition rebuild that follows. The view
+    /// guards against removing the last video track from the UI side.
+    func deleteTrack(_ id: Track.ID) {
+        project.timeline.tracks.removeAll { $0.id == id }
+        Task { await reloadComposition() }
     }
 
     // MARK: - Track toggles
@@ -254,25 +318,53 @@ final class EditorViewModel {
             var clamped = max(lowerBound, min(newStart, upperBound))
 
             // Snap to neighbour edges, the timeline origin, and the playhead
-            // when within tolerance — magnetic feel during drag-end.
-            let snapTolerance: TimeInterval = 0.08
-            var snapTargets: [TimeInterval] = [0, lowerBound]
-            if upperBound.isFinite { snapTargets.append(upperBound) }
-            let playheadStart = playback.currentTime
-            let playheadAsTrailing = playheadStart - duration
-            snapTargets.append(playheadStart)
-            if playheadAsTrailing >= lowerBound { snapTargets.append(playheadAsTrailing) }
+            // when within tolerance — magnetic feel during drag-end. Skipped
+            // entirely when the user has disabled snap from the toolbar.
+            if snapEnabled {
+                let snapTolerance: TimeInterval = 0.08
+                var snapTargets: [TimeInterval] = [0, lowerBound]
+                if upperBound.isFinite { snapTargets.append(upperBound) }
+                let playheadStart = playback.currentTime
+                let playheadAsTrailing = playheadStart - duration
+                snapTargets.append(playheadStart)
+                if playheadAsTrailing >= lowerBound { snapTargets.append(playheadAsTrailing) }
 
-            if let best = snapTargets
-                .filter({ $0 >= lowerBound && $0 <= upperBound })
-                .min(by: { abs($0 - clamped) < abs($1 - clamped) }),
-               abs(best - clamped) <= snapTolerance {
-                clamped = best
+                if let best = snapTargets
+                    .filter({ $0 >= lowerBound && $0 <= upperBound })
+                    .min(by: { abs($0 - clamped) < abs($1 - clamped) }),
+                   abs(best - clamped) <= snapTolerance {
+                    clamped = best
+                }
             }
 
             clip.timeRange = TimeRange(start: clamped, duration: duration)
             project.timeline.tracks[trackIndex].clips[clipIndex] = clip
             project.timeline.tracks[trackIndex].clips.sort { $0.timeRange.start < $1.timeRange.start }
+            return
+        }
+    }
+
+    /// Removes the selected clip AND shifts everything on the same track that
+    /// followed it left by its duration, closing the gap. Mirrors CapCut's
+    /// "Ripple Delete".
+    func rippleDeleteSelectedClip() async {
+        guard let id = selectedClipID else { return }
+        for trackIndex in project.timeline.tracks.indices {
+            let clips = project.timeline.tracks[trackIndex].clips
+            guard let clipIndex = clips.firstIndex(where: { $0.id == id }) else { continue }
+            let removed = clips[clipIndex]
+            let shift = removed.timeRange.duration
+            project.timeline.tracks[trackIndex].clips.remove(at: clipIndex)
+            for i in clipIndex..<project.timeline.tracks[trackIndex].clips.count {
+                var c = project.timeline.tracks[trackIndex].clips[i]
+                c.timeRange = TimeRange(
+                    start: max(0, c.timeRange.start - shift),
+                    duration: c.timeRange.duration
+                )
+                project.timeline.tracks[trackIndex].clips[i] = c
+            }
+            selectedClipID = nil
+            await reloadComposition()
             return
         }
     }
@@ -326,6 +418,27 @@ final class EditorViewModel {
                 return
             }
         }
+    }
+
+    // MARK: - Playback stepping
+
+    /// Step the playhead by `frames` frames at the project's frame rate.
+    /// Pauses playback so the user sees the exact frame.
+    func stepFrame(by frames: Int) {
+        let fps = max(1, project.canvas.frameRate)
+        let delta = Double(frames) / fps
+        seekRelative(by: delta)
+    }
+
+    /// Step the playhead by `seconds` seconds (positive forward).
+    func stepSeconds(by seconds: TimeInterval) {
+        seekRelative(by: seconds)
+    }
+
+    private func seekRelative(by seconds: TimeInterval) {
+        playback.pause()
+        let new = max(0, min(playback.duration, playback.currentTime + seconds))
+        playback.seek(to: new)
     }
 
     // MARK: - Playback

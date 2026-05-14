@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct ProjectGrid: View {
@@ -34,42 +35,58 @@ struct ProjectGrid: View {
 
 struct ProjectCard: View {
     @Environment(\.theme) private var theme
+    @Environment(AppEnvironment.self) private var environment
     let project: Project
     let onOpen: () -> Void
 
     @State private var isHovering = false
+    @State private var thumbnail: CGImage?
 
     var body: some View {
         Button(action: onOpen) {
             VStack(alignment: .leading, spacing: theme.spacing.sm) {
-                ZStack {
-                    LinearGradient(
-                        colors: [
-                            theme.colors.surfaceElevated,
-                            theme.colors.surface
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+                // Color.clear sets a strict 16:9 box for the cell; the
+                // background gradient and the thumbnail overlay both render
+                // inside that box and the outer .clipped() crops any
+                // overflow. Without this, a tall/portrait image's intrinsic
+                // ratio overrides .aspectRatio and the card grows.
+                Color.clear
+                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                    .background(
+                        LinearGradient(
+                            colors: [
+                                theme.colors.surfaceElevated,
+                                theme.colors.surface
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
                     )
-                    Image(systemName: "film")
-                        .font(.system(size: 26, weight: .light))
-                        .foregroundStyle(theme.colors.textTertiary)
-                }
-                .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                .overlay(alignment: .bottomLeading) {
-                    Text(String(format: "%.1fs", max(0.1, project.timeline.duration)))
-                        .font(theme.typography.caption.monospacedDigit())
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.black.opacity(0.55), in: Capsule())
-                        .padding(theme.spacing.sm)
-                }
-                .clipShape(RoundedRectangle(cornerRadius: theme.radius.md))
-                .overlay(
-                    RoundedRectangle(cornerRadius: theme.radius.md)
-                        .stroke(isHovering ? theme.colors.accent.opacity(0.6) : theme.colors.border, lineWidth: 1)
-                )
+                    .overlay {
+                        if let thumbnail {
+                            Image(decorative: thumbnail, scale: 1)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                        } else {
+                            Image(systemName: "film")
+                                .font(.system(size: 26, weight: .light))
+                                .foregroundStyle(theme.colors.textTertiary)
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: theme.radius.md))
+                    .overlay(alignment: .bottomLeading) {
+                        Text(String(format: "%.1fs", max(0.1, project.timeline.duration)))
+                            .font(theme.typography.caption.monospacedDigit())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.black.opacity(0.55), in: Capsule())
+                            .padding(theme.spacing.sm)
+                    }
+                    .overlay(
+                        RoundedRectangle(cornerRadius: theme.radius.md)
+                            .stroke(isHovering ? theme.colors.accent.opacity(0.6) : theme.colors.border, lineWidth: 1)
+                    )
                 VStack(alignment: .leading, spacing: 1) {
                     Text(project.name)
                         .font(theme.typography.bodyEmphasized)
@@ -94,6 +111,59 @@ struct ProjectCard: View {
                 isHovering = hovering
             }
         }
+        .task(id: thumbnailKey) {
+            await loadThumbnail()
+        }
+    }
+
+    /// Distinguishes "cover changed" from "first video changed" so .task fires
+    /// when either source updates.
+    private var thumbnailKey: String {
+        let cover = project.coverBookmark?.hashValue ?? 0
+        let firstVideoID = project.assets.first(where: { $0.kind == .video })?.id.uuidString ?? ""
+        return "\(project.id)|\(cover)|\(firstVideoID)"
+    }
+
+    /// Cover image preferred; if there isn't one, fall back to a poster frame
+    /// from the first video asset.
+    private func loadThumbnail() async {
+        if let image = await loadCoverImage() {
+            await MainActor.run { thumbnail = image }
+            return
+        }
+        if let image = await loadFirstVideoPoster() {
+            await MainActor.run { thumbnail = image }
+            return
+        }
+        await MainActor.run { thumbnail = nil }
+    }
+
+    private func loadCoverImage() async -> CGImage? {
+        guard let bookmark = project.coverBookmark else { return nil }
+        var isStale = false
+        guard let url = try? URL(
+            resolvingBookmarkData: bookmark,
+            options: [.withSecurityScope],
+            relativeTo: nil,
+            bookmarkDataIsStale: &isStale
+        ) else { return nil }
+        let didStart = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStart { url.stopAccessingSecurityScopedResource() }
+        }
+        guard let nsImage = NSImage(contentsOf: url) else { return nil }
+        var rect = CGRect(origin: .zero, size: nsImage.size)
+        return nsImage.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+    }
+
+    private func loadFirstVideoPoster() async -> CGImage? {
+        guard let video = project.assets.first(where: { $0.kind == .video }) else { return nil }
+        guard let url = try? await environment.assetResolver.resolve(video) else { return nil }
+        return await environment.thumbnailGenerator.poster(
+            for: url,
+            at: 0,
+            size: CGSize(width: 640, height: 360)
+        )
     }
 }
 

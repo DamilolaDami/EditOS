@@ -16,6 +16,15 @@ struct PreviewPanel: View {
                         .padding(theme.spacing.lg)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+                // Tapping in the preview area (anywhere outside the timeline)
+                // clears the current clip selection — matches CapCut's "tap
+                // out to deselect" behaviour.
+                .onTapGesture {
+                    if model.selectedClipID != nil {
+                        model.selectClip(nil)
+                    }
+                }
                 Divider().overlay(theme.colors.border)
                 PreviewControls(model: model)
             }
@@ -57,6 +66,9 @@ struct PreviewPanel: View {
         PreviewSurface(player: model.playback.player)
             .aspectRatio(canvasAspect, contentMode: .fit)
             .background(Color.black)
+            .overlay {
+                OverlayCanvas(model: model)
+            }
             .clipShape(RoundedRectangle(cornerRadius: theme.radius.sm))
             .overlay(
                 RoundedRectangle(cornerRadius: theme.radius.sm)
@@ -69,6 +81,72 @@ struct PreviewPanel: View {
         let size = model.project.canvas.size
         guard size.height > 0 else { return 16.0 / 9.0 }
         return size.width / size.height
+    }
+}
+
+/// Renders text and sticker overlay clips active at the current playhead time
+/// on top of the player view. Scales canvas-space sizing into the preview's
+/// rendered rect.
+private struct OverlayCanvas: View {
+    @Bindable var model: EditorViewModel
+
+    var body: some View {
+        GeometryReader { proxy in
+            let canvas = model.project.canvas.size
+            let scale = canvas.width > 0 && canvas.height > 0
+                ? min(proxy.size.width / canvas.width, proxy.size.height / canvas.height)
+                : 1.0
+            ZStack {
+                ForEach(activeOverlays, id: \.id) { clip in
+                    view(for: clip, scale: scale)
+                }
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .allowsHitTesting(false)
+        }
+    }
+
+    private var activeOverlays: [Clip] {
+        let t = model.playback.currentTime
+        var clips: [Clip] = []
+        for track in model.project.timeline.tracks where !track.isHidden {
+            switch track.kind {
+            case .caption, .sticker, .overlay:
+                clips.append(contentsOf: track.clips.filter { $0.timeRange.contains(t) })
+            default:
+                continue
+            }
+        }
+        return clips
+    }
+
+    @ViewBuilder
+    private func view(for clip: Clip, scale: CGFloat) -> some View {
+        let baseSize = clip.overlaySize ?? (clip.text != nil ? 64 : 96)
+        let color = swiftUIColor(clip.foregroundColor ?? .white)
+        let dx = clip.transform.translation.width * scale
+        let dy = clip.transform.translation.height * scale
+        Group {
+            if let text = clip.text {
+                Text(text)
+                    .font(.system(size: max(8, baseSize * scale), weight: .bold))
+                    .foregroundStyle(color)
+                    .shadow(color: .black.opacity(0.5), radius: 4, y: 1)
+            } else if let symbol = clip.stickerSymbol {
+                Image(systemName: symbol)
+                    .font(.system(size: max(8, baseSize * scale), weight: .bold))
+                    .foregroundStyle(color)
+                    .shadow(color: .black.opacity(0.5), radius: 4, y: 1)
+            }
+        }
+        .opacity(clip.transform.opacity)
+        .rotationEffect(.radians(clip.transform.rotation))
+        .scaleEffect(clip.transform.scale)
+        .offset(x: dx, y: dy)
+    }
+
+    private func swiftUIColor(_ rgba: ColorRGBA) -> Color {
+        Color(red: rgba.red, green: rgba.green, blue: rgba.blue, opacity: rgba.alpha)
     }
 }
 

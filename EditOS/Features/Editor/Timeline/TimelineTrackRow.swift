@@ -7,10 +7,12 @@ enum TimelineTrimEdge {
 
 struct TimelineTrackRow: View {
     @Environment(\.theme) private var theme
+    @Bindable var model: EditorViewModel
     let track: Track
     let pixelsPerSecond: CGFloat
     let assets: [MediaAsset]
     let selectedClipID: Clip.ID?
+    let playheadTime: TimeInterval
     let onSelectClip: (Clip.ID) -> Void
     /// Sets the edge of `id` to the given timeline time (seconds).
     let onTrim: (Clip.ID, TimelineTrimEdge, TimeInterval) -> Void
@@ -20,10 +22,13 @@ struct TimelineTrackRow: View {
     let onMoveEnded: () -> Void
     /// Scrub via taps on empty (non-clip) areas of this row.
     let onScrubEmpty: (TimeInterval) -> Void
+    /// Live snap-target while dragging a clip — `nil` when no snap is active.
+    let onSnapPreview: (TimeInterval?) -> Void
 
-    private let trackHeight: CGFloat = 56
     /// Two boundaries closer than this (in seconds) are treated as touching.
     private let adjacencyEpsilon: TimeInterval = 0.001
+    private var trackHeight: CGFloat { track.kind.timelineHeight }
+    private var isCompactRow: Bool { trackHeight < 40 }
 
     var body: some View {
         ZStack(alignment: .leading) {
@@ -53,6 +58,7 @@ struct TimelineTrackRow: View {
                     abs($0.timeRange.start - clip.timeRange.end) < adjacencyEpsilon
                 } ?? false
 
+                let snapTargets = snapCandidates(excluding: clip.id)
                 TimelineClipView(
                     clip: clip,
                     asset: assets.first(where: { $0.id == clip.assetID }),
@@ -60,6 +66,8 @@ struct TimelineTrackRow: View {
                     pixelsPerSecond: pixelsPerSecond,
                     tint: track.kind.color(in: theme),
                     isSelected: selectedClipID == clip.id,
+                    isCompact: isCompactRow,
+                    snapCandidates: snapTargets,
                     onTrimLeading: { x in
                         let time = max(0, Double(x / pixelsPerSecond))
                         // CapCut-style joint trim: when the leading edge is
@@ -84,14 +92,50 @@ struct TimelineTrackRow: View {
                         onMove(clip.id, newStart)
                     },
                     onMoveEnded: onMoveEnded,
+                    onSnapPreview: onSnapPreview,
                     onSelect: { onSelectClip(clip.id) }
                 )
+                .contextMenu {
+                    Button {
+                        onSelectClip(clip.id)
+                        Task { await model.splitClipAtPlayhead() }
+                    } label: { Label("Split at Playhead", systemImage: "scissors") }
+
+                    Button {
+                        model.toggleClipMuted(clip.id)
+                    } label: {
+                        Label(
+                            clip.volume > 0 ? "Mute" : "Unmute",
+                            systemImage: clip.volume > 0 ? "speaker.slash" : "speaker.wave.2"
+                        )
+                    }
+                    Divider()
+                    Button(role: .destructive) {
+                        onSelectClip(clip.id)
+                        Task { await model.deleteSelectedClip() }
+                    } label: { Label("Delete", systemImage: "trash") }
+                    Button(role: .destructive) {
+                        onSelectClip(clip.id)
+                        Task { await model.rippleDeleteSelectedClip() }
+                    } label: { Label("Ripple Delete", systemImage: "arrow.left.and.right.righttriangle.left.righttriangle.right") }
+                }
                 .frame(width: width)
                 .offset(x: CGFloat(clip.timeRange.start) * pixelsPerSecond)
             }
         }
         .frame(height: trackHeight)
         .opacity(track.isHidden ? 0.4 : 1.0)
+    }
+
+    /// Times the dragged clip can snap to: timeline origin, every other clip's
+    /// edges, and the current playhead.
+    private func snapCandidates(excluding excludedID: Clip.ID) -> [TimeInterval] {
+        var candidates: [TimeInterval] = [0, playheadTime]
+        for other in track.clips where other.id != excludedID {
+            candidates.append(other.timeRange.start)
+            candidates.append(other.timeRange.end)
+        }
+        return candidates
     }
 }
 
@@ -104,12 +148,21 @@ struct TimelineClipView: View {
     let pixelsPerSecond: CGFloat
     let tint: Color
     let isSelected: Bool
+    /// Slim presentation for short rows (overlay / caption / sticker).
+    /// Skips filmstrip + waveform and lays the label inline so the clip stays
+    /// readable at ~26pt tall.
+    var isCompact: Bool = false
+    /// Times this clip should snap to while being dragged.
+    let snapCandidates: [TimeInterval]
     let onTrimLeading: (CGFloat) -> Void
     let onTrimTrailing: (CGFloat) -> Void
     let onTrimEnded: () -> Void
     /// Pixel delta from the start of the body drag.
     let onMove: (CGFloat) -> Void
     let onMoveEnded: () -> Void
+    /// Reports the active snap target (nil when none) so the panel can draw
+    /// a snap line under the playhead.
+    let onSnapPreview: (TimeInterval?) -> Void
     let onSelect: () -> Void
 
     @State private var thumbnails: [CGImage] = []
@@ -124,52 +177,90 @@ struct TimelineClipView: View {
         ZStack {
             // Base tint — visible behind/around the thumbnails or waveform.
             RoundedRectangle(cornerRadius: theme.radius.sm)
-                .fill(tint.opacity(0.85))
+                .fill(tint.opacity(isCompact ? 1.0 : 0.85))
 
-            // Filmstrip thumbnails (video).
-            if !thumbnails.isEmpty {
-                FilmstripRow(images: thumbnails)
-                    .clipShape(RoundedRectangle(cornerRadius: theme.radius.sm))
-            }
+            if !isCompact {
+                // Overlay clip preview (text / sticker) — these don't carry an
+                // asset, so the filmstrip/waveform paths short-circuit cleanly.
+                if let text = clip.text {
+                    HStack(spacing: 4) {
+                        Image(systemName: "textformat")
+                            .font(.system(size: 11, weight: .bold))
+                        Text(text)
+                            .font(theme.typography.bodyEmphasized)
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                } else if let symbol = clip.stickerSymbol {
+                    Image(systemName: symbol)
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundStyle(.white)
+                }
 
-            // Audio waveform. For audio clips the waveform fills the cell. For
-            // video clips it tucks under the filmstrip as a thin level strip
-            // so the user can still see where the loud beats are.
-            if !waveformSamples.isEmpty {
-                if asset?.kind == .audio {
-                    WaveformView(samples: waveformSamples, color: .white.opacity(0.9))
-                        .padding(.vertical, 8)
-                        .padding(.horizontal, 6)
+                // Filmstrip thumbnails (video).
+                if !thumbnails.isEmpty {
+                    FilmstripRow(images: thumbnails)
                         .clipShape(RoundedRectangle(cornerRadius: theme.radius.sm))
-                } else {
-                    VStack(spacing: 0) {
-                        Spacer()
-                        WaveformView(samples: waveformSamples, color: .white.opacity(0.85))
-                            .frame(height: 14)
-                            .padding(.horizontal, 4)
-                            .padding(.bottom, 4)
+                }
+
+                // Audio waveform. For audio clips the waveform fills the cell.
+                // For video clips it tucks under the filmstrip as a thin level
+                // strip so the user can still see where the loud beats are.
+                if !waveformSamples.isEmpty {
+                    if asset?.kind == .audio {
+                        WaveformView(samples: waveformSamples, color: .white.opacity(0.9))
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 6)
+                            .clipShape(RoundedRectangle(cornerRadius: theme.radius.sm))
+                    } else {
+                        VStack(spacing: 0) {
+                            Spacer()
+                            WaveformView(samples: waveformSamples, color: .white.opacity(0.85))
+                                .frame(height: 14)
+                                .padding(.horizontal, 4)
+                                .padding(.bottom, 4)
+                        }
                     }
                 }
-            }
 
-            // Bottom-tinted band so the clip still reads as colored even with thumbs.
-            VStack(spacing: 0) {
-                Spacer()
-                Rectangle()
-                    .fill(tint)
-                    .frame(height: 3)
+                // Bottom-tinted band so the clip still reads as colored even
+                // with thumbs.
+                VStack(spacing: 0) {
+                    Spacer()
+                    Rectangle()
+                        .fill(tint)
+                        .frame(height: 3)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: theme.radius.sm))
             }
-            .clipShape(RoundedRectangle(cornerRadius: theme.radius.sm))
         }
-        .overlay(alignment: .topLeading) {
-            Text(clip.label ?? "Clip")
-                .font(theme.typography.caption)
-                .foregroundStyle(.white)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.black.opacity(0.55), in: Capsule())
-                .padding(theme.spacing.xs)
-                .allowsHitTesting(false)
+        .overlay(alignment: isCompact ? .leading : .topLeading) {
+            HStack(spacing: 4) {
+                if let symbol = clip.stickerSymbol {
+                    Image(systemName: symbol)
+                        .font(.system(size: 10, weight: .bold))
+                } else if clip.text != nil {
+                    Image(systemName: "textformat")
+                        .font(.system(size: 10, weight: .bold))
+                } else if clip.volume == 0 {
+                    Image(systemName: "speaker.slash.fill")
+                        .font(.system(size: 9, weight: .bold))
+                }
+                Text(clip.label ?? "Clip")
+                    .font(theme.typography.caption)
+                    .lineLimit(1)
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, isCompact ? 6 : 6)
+            .padding(.vertical, 2)
+            .background(
+                isCompact ? Color.clear : Color.black.opacity(0.55),
+                in: Capsule()
+            )
+            .padding(.horizontal, isCompact ? 4 : theme.spacing.xs)
+            .padding(.vertical, isCompact ? 0 : theme.spacing.xs)
+            .allowsHitTesting(false)
         }
         .overlay {
             RoundedRectangle(cornerRadius: theme.radius.sm)
@@ -195,6 +286,15 @@ struct TimelineClipView: View {
         }
         .offset(x: dragOffset)
         .shadow(color: .black.opacity(isDragging ? 0.4 : 0), radius: isDragging ? 6 : 0, y: isDragging ? 2 : 0)
+        .onHover { hovering in
+            // Open-hand cursor over the clip body so users know they can grab
+            // it. Trim handles override with resizeLeftRight on their hover.
+            if hovering {
+                (isDragging ? NSCursor.closedHand : NSCursor.openHand).set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
         // Body drag — moves the clip horizontally. minimumDistance > 0 so a
         // pure tap doesn't trigger move, leaving room for the tap-select below.
         .gesture(
@@ -202,11 +302,13 @@ struct TimelineClipView: View {
                 .onChanged { value in
                     isDragging = true
                     dragOffset = value.translation.width
+                    onSnapPreview(snapTarget(forPixelDelta: value.translation.width))
                 }
                 .onEnded { value in
                     let delta = value.translation.width
                     dragOffset = 0
                     isDragging = false
+                    onSnapPreview(nil)
                     if abs(delta) >= 1 {
                         onMove(delta)
                         onMoveEnded()
@@ -220,6 +322,33 @@ struct TimelineClipView: View {
         .task(id: waveformKey) {
             await loadWaveform()
         }
+    }
+
+    /// Picks the snap candidate (clip start *or* clip end) closest to the
+    /// dragged clip's projected position, within a six-pixel tolerance. Drives
+    /// the snap-line preview while dragging.
+    private func snapTarget(forPixelDelta deltaPixels: CGFloat) -> TimeInterval? {
+        guard pixelsPerSecond > 0 else { return nil }
+        let deltaSeconds = Double(deltaPixels / pixelsPerSecond)
+        let projectedStart = clip.timeRange.start + deltaSeconds
+        let projectedEnd = projectedStart + clip.timeRange.duration
+        let tolerance = max(0.04, Double(6 / pixelsPerSecond))
+
+        var bestCandidate: TimeInterval?
+        var bestDistance = tolerance
+        for candidate in snapCandidates {
+            let dStart = abs(candidate - projectedStart)
+            let dEnd = abs(candidate - projectedEnd)
+            if dStart < bestDistance {
+                bestCandidate = candidate
+                bestDistance = dStart
+            }
+            if dEnd < bestDistance {
+                bestCandidate = candidate
+                bestDistance = dEnd
+            }
+        }
+        return bestCandidate
     }
 
     private var thumbnailKey: String {

@@ -11,6 +11,7 @@ struct EditorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            EditorTopBar(model: model)
             HStack(spacing: theme.spacing.sm) {
                 EditorToolbar(selected: $model.selectedTool)
                 if model.isLibraryVisible {
@@ -29,7 +30,6 @@ struct EditorView: View {
             .frame(maxHeight: .infinity)
 
             TimelinePanel(model: model)
-                .frame(height: 280)
                 .padding(theme.spacing.sm)
         }
         .background(theme.colors.background)
@@ -37,6 +37,11 @@ struct EditorView: View {
         .focusedSceneValue(\.editorModel, model)
         .task(id: model.project.id) {
             await model.reloadComposition()
+        }
+        // Persist project edits (trim, move, delete, mute, cover, etc.) — the
+        // model mutates `project` directly so we save whenever it changes.
+        .onChange(of: model.project) { _, newProject in
+            environment.projectStore.update(newProject)
         }
         .onDeleteCommand {
             Task { await model.deleteSelectedClip() }

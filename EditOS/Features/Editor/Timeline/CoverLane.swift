@@ -47,6 +47,19 @@ struct CoverLane: View {
             }
             .buttonStyle(.plain)
             .help(thumbnail == nil ? "Add a cover image for this project" : "Replace the cover image")
+            .contextMenu {
+                Button {
+                    isImporterPresented = true
+                } label: { Label("Choose Image…", systemImage: "photo") }
+                if model.project.coverBookmark != nil {
+                    Divider()
+                    Button(role: .destructive) {
+                        model.setCover(from: nil)
+                        environment.projectStore.update(model.project)
+                        thumbnail = nil
+                    } label: { Label("Remove Cover", systemImage: "trash") }
+                }
+            }
             Spacer(minLength: 0)
         }
         .frame(height: height)

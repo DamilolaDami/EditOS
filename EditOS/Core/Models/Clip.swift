@@ -14,6 +14,18 @@ struct Clip: Identifiable, Hashable, Sendable, Codable {
     var speed: Double
     var label: String?
 
+    // MARK: - Overlay payload
+
+    /// Text content when the clip lives on a `.caption` track. Optional so
+    /// media clips can ignore it.
+    var text: String?
+    /// SF Symbol name when the clip lives on a `.sticker` track.
+    var stickerSymbol: String?
+    /// Color used by text/sticker clips when rendering on the canvas.
+    var foregroundColor: ColorRGBA?
+    /// Font / sticker size in canvas points.
+    var overlaySize: CGFloat?
+
     init(
         id: UUID = UUID(),
         assetID: MediaAsset.ID,
@@ -22,7 +34,11 @@ struct Clip: Identifiable, Hashable, Sendable, Codable {
         transform: ClipTransform = .identity,
         volume: Float = 1.0,
         speed: Double = 1.0,
-        label: String? = nil
+        label: String? = nil,
+        text: String? = nil,
+        stickerSymbol: String? = nil,
+        foregroundColor: ColorRGBA? = nil,
+        overlaySize: CGFloat? = nil
     ) {
         self.id = id
         self.assetID = assetID
@@ -32,6 +48,10 @@ struct Clip: Identifiable, Hashable, Sendable, Codable {
         self.volume = volume
         self.speed = speed
         self.label = label
+        self.text = text
+        self.stickerSymbol = stickerSymbol
+        self.foregroundColor = foregroundColor
+        self.overlaySize = overlaySize
     }
 }
 

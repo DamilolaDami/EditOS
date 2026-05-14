@@ -1,24 +1,19 @@
 import AVFoundation
-import CoreGraphics
 import Foundation
 import OSLog
 
 /// Result of compositing a project into AVFoundation primitives.
 struct CompositionResult: Sendable {
     let composition: AVComposition
-    let videoComposition: AVVideoComposition?
     let audioMix: AVAudioMix?
 }
 
-/// Builds an `AVComposition` (and matching `AVVideoComposition` / `AVAudioMix`)
-/// from a `Project`.
+/// Builds an `AVComposition` (and matching `AVAudioMix`) from a `Project`.
 ///
 /// Layout:
-/// - One composition video track *per clip*, so each clip can carry its own
-///   `preferredTransform` and aspect-fit scaling via a layer instruction. This
-///   is what makes clips render at their native aspect ratio inside the
-///   project canvas (vertical clips letterbox, etc.) instead of stretching to
-///   share a single track's transform.
+/// - One shared video composition track holds every clip's video stream so
+///   AVPlayer renders continuously across clips. (Per-clip transforms will move
+///   to an AVVideoComposition when we add that.)
 /// - One audio composition track per clip so we can mix volumes independently.
 /// - Clips are inserted in chronological order — `insertTimeRange(...at:)`
 ///   pushes existing content forward, so out-of-order inserts would shuffle
@@ -33,8 +28,9 @@ struct CompositionBuilder: Sendable {
 
     func build(_ project: Project, assetResolver: AssetResolver) async throws -> CompositionResult {
         let composition = AVMutableComposition()
+        var sharedVideoTrack: AVMutableCompositionTrack?
+        var didSetVideoTransform = false
         var audioParams: [AVMutableAudioMixInputParameters] = []
-        var layerInstructions: [AVMutableVideoCompositionLayerInstruction] = []
 
         // Collect every visible (track, clip) pair, then insert in chronological
         // order so insertTimeRange's auto-push doesn't re-arrange already-placed
@@ -49,6 +45,9 @@ struct CompositionBuilder: Sendable {
 
         for entry in entries {
             let clip = entry.clip
+            // Text / sticker / overlay tracks don't composite into AV — the
+            // preview renders them as a SwiftUI overlay on top of the player.
+            guard entry.kind == .video || entry.kind == .audio else { continue }
             guard let asset = project.assets.first(where: { $0.id == clip.assetID }) else {
                 Self.log.error("Missing asset \(clip.assetID, privacy: .public) for clip \(clip.id, privacy: .public)")
                 continue
@@ -60,10 +59,10 @@ struct CompositionBuilder: Sendable {
                     asset: AVURLAsset(url: url),
                     kind: entry.kind,
                     isMuted: entry.isMuted,
-                    canvasSize: project.canvas.size,
                     into: composition,
-                    audioParams: &audioParams,
-                    layerInstructions: &layerInstructions
+                    sharedVideoTrack: &sharedVideoTrack,
+                    didSetVideoTransform: &didSetVideoTransform,
+                    audioParams: &audioParams
                 )
             } catch {
                 Self.log.error("Failed to insert clip \(clip.id, privacy: .public) (\(asset.displayName, privacy: .public)): \(String(describing: error), privacy: .public)")
@@ -79,17 +78,9 @@ struct CompositionBuilder: Sendable {
             m.inputParameters = audioParams
             mix = m.copy() as? AVAudioMix
         }
-
-        let videoComp = makeVideoComposition(
-            duration: composition.duration,
-            canvas: project.canvas,
-            layerInstructions: layerInstructions
-        )
-
-        Self.log.info("Built composition: duration \(composition.duration.seconds, privacy: .public)s, \(composition.tracks.count, privacy: .public) tracks, \(layerInstructions.count, privacy: .public) video layers, \(audioParams.count, privacy: .public) audio params")
+        Self.log.info("Built composition: duration \(composition.duration.seconds, privacy: .public)s, \(composition.tracks.count, privacy: .public) tracks, \(audioParams.count, privacy: .public) audio params")
         return CompositionResult(
             composition: composition.copy() as! AVComposition,
-            videoComposition: videoComp,
             audioMix: mix
         )
     }
@@ -99,10 +90,10 @@ struct CompositionBuilder: Sendable {
         asset: AVURLAsset,
         kind: Track.Kind,
         isMuted: Bool,
-        canvasSize: CGSize,
         into composition: AVMutableComposition,
-        audioParams: inout [AVMutableAudioMixInputParameters],
-        layerInstructions: inout [AVMutableVideoCompositionLayerInstruction]
+        sharedVideoTrack: inout AVMutableCompositionTrack?,
+        didSetVideoTransform: inout Bool,
+        audioParams: inout [AVMutableAudioMixInputParameters]
     ) async throws {
         let startCMTime = CMTime(seconds: clip.timeRange.start, preferredTimescale: 600)
         let sourceCMRange = clip.sourceRange.cmTimeRange
@@ -112,38 +103,23 @@ struct CompositionBuilder: Sendable {
         // Video — only for non-audio tracks.
         if kind != .audio {
             let videoTracks = try await asset.loadTracks(withMediaType: .video)
-            if let sourceVideo = videoTracks.first,
-               let videoTrack = composition.addMutableTrack(
-                    withMediaType: .video,
-                    preferredTrackID: kCMPersistentTrackID_Invalid
-               ) {
-                try videoTrack.insertTimeRange(sourceCMRange, of: sourceVideo, at: startCMTime)
-
-                let naturalSize = try await sourceVideo.load(.naturalSize)
-                let preferred = try await sourceVideo.load(.preferredTransform)
-                let aspectFit = Self.aspectFitTransform(
-                    naturalSize: naturalSize,
-                    preferred: preferred,
-                    canvas: canvasSize
-                )
-
+            
+            if let sourceVideo = videoTracks.first {
+                if sharedVideoTrack == nil {
+                    sharedVideoTrack = composition.addMutableTrack(
+                        withMediaType: .video,
+                        preferredTrackID: kCMPersistentTrackID_Invalid
+                    )
+                }
+                try sharedVideoTrack?.insertTimeRange(sourceCMRange, of: sourceVideo, at: startCMTime)
+                if !didSetVideoTransform {
+                    sharedVideoTrack?.preferredTransform = try await sourceVideo.load(.preferredTransform)
+                    didSetVideoTransform = true
+                }
                 if needsScale {
                     let insertedRange = CMTimeRange(start: startCMTime, duration: sourceCMRange.duration)
-                    videoTrack.scaleTimeRange(insertedRange, toDuration: displayDuration)
+                    sharedVideoTrack?.scaleTimeRange(insertedRange, toDuration: displayDuration)
                 }
-
-                let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: videoTrack)
-                layer.setTransform(aspectFit, at: .zero)
-                // Track only carries video for [startCMTime, clipEnd) — clamp
-                // opacity to that range so an overlay or out-of-range frame
-                // doesn't leak previous content.
-                let clipEnd = CMTimeAdd(startCMTime, displayDuration)
-                if startCMTime > .zero {
-                    layer.setOpacity(0, at: .zero)
-                    layer.setOpacity(1, at: startCMTime)
-                }
-                layer.setOpacity(0, at: clipEnd)
-                layerInstructions.append(layer)
             }
         }
 
@@ -161,56 +137,10 @@ struct CompositionBuilder: Sendable {
             }
             if let audioTrack {
                 let params = AVMutableAudioMixInputParameters(track: audioTrack)
-                params.setVolume(isMuted ? 0 : clip.volume, at: .zero)
+                params.setVolume(clip.volume, at: .zero)
                 audioParams.append(params)
             }
         }
-    }
-
-    private func makeVideoComposition(
-        duration: CMTime,
-        canvas: CanvasFormat,
-        layerInstructions: [AVMutableVideoCompositionLayerInstruction]
-    ) -> AVVideoComposition? {
-        guard !layerInstructions.isEmpty, duration > .zero else { return nil }
-
-        let comp = AVMutableVideoComposition()
-        comp.renderSize = canvas.size
-        let fps = max(1, canvas.frameRate)
-        comp.frameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
-
-        let instruction = AVMutableVideoCompositionInstruction()
-        instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
-        instruction.backgroundColor = CGColor(red: 0, green: 0, blue: 0, alpha: 1)
-        instruction.layerInstructions = layerInstructions
-        comp.instructions = [instruction]
-
-        return comp.copy() as? AVVideoComposition
-    }
-
-    /// Transform that orients a clip's source frame and scales it to fit the
-    /// project canvas without cropping (aspect-fit, centered). Preserves the
-    /// source's native aspect ratio — letterboxing/pillarboxing fills the gaps.
-    static func aspectFitTransform(
-        naturalSize: CGSize,
-        preferred: CGAffineTransform,
-        canvas: CGSize
-    ) -> CGAffineTransform {
-        // Where the source rect lands after the preferredTransform — this
-        // captures any rotation/flip the source asset specifies.
-        let oriented = CGRect(origin: .zero, size: naturalSize).applying(preferred)
-        let displaySize = CGSize(width: abs(oriented.width), height: abs(oriented.height))
-        guard displaySize.width > 0, displaySize.height > 0 else { return preferred }
-
-        let scale = min(canvas.width / displaySize.width, canvas.height / displaySize.height)
-        let scaledWidth = displaySize.width * scale
-        let scaledHeight = displaySize.height * scale
-        let dx = (canvas.width - scaledWidth) / 2 - oriented.origin.x * scale
-        let dy = (canvas.height - scaledHeight) / 2 - oriented.origin.y * scale
-
-        return preferred
-            .concatenating(CGAffineTransform(scaleX: scale, y: scale))
-            .concatenating(CGAffineTransform(translationX: dx, y: dy))
     }
 }
 
