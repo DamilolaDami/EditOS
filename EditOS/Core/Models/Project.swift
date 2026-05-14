@@ -9,6 +9,9 @@ struct Project: Identifiable, Hashable, Sendable, Codable {
     var canvas: CanvasFormat
     var assets: [MediaAsset]
     var timeline: Timeline
+    /// Security-scoped bookmark to the project's cover image. Optional — when
+    /// unset, the timeline shows an empty "+ Cover" slot.
+    var coverBookmark: Data?
 
     init(
         id: UUID = UUID(),
@@ -17,7 +20,8 @@ struct Project: Identifiable, Hashable, Sendable, Codable {
         modifiedAt: Date = .now,
         canvas: CanvasFormat = .hd,
         assets: [MediaAsset] = [],
-        timeline: Timeline = Timeline()
+        timeline: Timeline = Timeline(),
+        coverBookmark: Data? = nil
     ) {
         self.id = id
         self.name = name
@@ -26,6 +30,7 @@ struct Project: Identifiable, Hashable, Sendable, Codable {
         self.canvas = canvas
         self.assets = assets
         self.timeline = timeline
+        self.coverBookmark = coverBookmark
     }
 }
 

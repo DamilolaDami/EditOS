@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 
@@ -46,7 +47,17 @@ final class EditorViewModel {
     // MARK: - Library import
 
     func addAsset(_ asset: MediaAsset) {
+        // First imported video sets the project canvas to the asset's native
+        // size, so the player frame matches the source's real aspect ratio.
+        // Later imports just use the canvas that's already there — they
+        // letterbox via the per-clip aspect-fit transform.
+        let isFirstVideo = asset.kind == .video
+            && !project.assets.contains { $0.kind == .video }
         project.assets.append(asset)
+        if isFirstVideo, let nativeSize = asset.nativeSize,
+           nativeSize.width > 0, nativeSize.height > 0 {
+            project.canvas.size = nativeSize
+        }
 
         let kind: Track.Kind = (asset.kind == .audio) ? .audio : .video
         guard let trackIndex = project.timeline.tracks.firstIndex(where: { $0.kind == kind }) else { return }
@@ -60,6 +71,23 @@ final class EditorViewModel {
             label: asset.displayName
         )
         project.timeline.tracks[trackIndex].clips.append(clip)
+    }
+
+    // MARK: - Cover
+
+    /// Records a bookmark for the project cover image. The URL is expected to
+    /// have an active security scope at call time. Pass `nil` to clear.
+    func setCover(from url: URL?) {
+        guard let url else {
+            project.coverBookmark = nil
+            return
+        }
+        let bookmark = try? url.bookmarkData(
+            options: [.withSecurityScope],
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+        project.coverBookmark = bookmark
     }
 
     // MARK: - Track toggles
@@ -127,6 +155,125 @@ final class EditorViewModel {
             guard newSourceDuration > 0.05 else { return }
             clip.timeRange = TimeRange(start: clip.timeRange.start, duration: newDuration)
             clip.sourceRange = TimeRange(start: clip.sourceRange.start, duration: newSourceDuration)
+        }
+    }
+
+    /// Add an existing library asset to its appropriate track, preferring to
+    /// place its leading edge at `time`. If that overlaps an existing clip the
+    /// new clip is appended to the end of the track instead.
+    func placeAsset(_ asset: MediaAsset, atTime time: TimeInterval) {
+        if !project.assets.contains(where: { $0.id == asset.id }) {
+            let isFirstVideo = asset.kind == .video
+                && !project.assets.contains { $0.kind == .video }
+            project.assets.append(asset)
+            if isFirstVideo, let nativeSize = asset.nativeSize,
+               nativeSize.width > 0, nativeSize.height > 0 {
+                project.canvas.size = nativeSize
+            }
+        }
+
+        let kind: Track.Kind = (asset.kind == .audio) ? .audio : .video
+        guard let trackIndex = project.timeline.tracks.firstIndex(where: { $0.kind == kind }) else { return }
+        let duration = max(0.1, asset.duration)
+        let start = freeSlotStart(in: trackIndex, preferred: max(0, time), duration: duration)
+        let clip = Clip(
+            assetID: asset.id,
+            timeRange: TimeRange(start: start, duration: duration),
+            sourceRange: TimeRange(start: 0, duration: duration),
+            label: asset.displayName
+        )
+        project.timeline.tracks[trackIndex].clips.append(clip)
+        project.timeline.tracks[trackIndex].clips.sort { $0.timeRange.start < $1.timeRange.start }
+    }
+
+    /// Returns the earliest start time that fits `duration` on the track without
+    /// overlapping any existing clip. Prefers `preferred`; if that overlaps,
+    /// snaps just after the latest clip that ends before the gap closes.
+    private func freeSlotStart(in trackIndex: Int, preferred: TimeInterval, duration: TimeInterval) -> TimeInterval {
+        let clips = project.timeline.tracks[trackIndex].clips
+        let candidate = TimeRange(start: preferred, duration: duration)
+        if !clips.contains(where: { $0.timeRange.intersects(candidate) }) {
+            return preferred
+        }
+        return clips.last?.timeRange.end ?? 0
+    }
+
+    /// Removes an asset and any clips referencing it.
+    func removeAsset(_ id: MediaAsset.ID) async {
+        project.assets.removeAll { $0.id == id }
+        for trackIndex in project.timeline.tracks.indices {
+            project.timeline.tracks[trackIndex].clips.removeAll { $0.assetID == id }
+        }
+        if let selected = selectedClipID,
+           !project.timeline.tracks.flatMap(\.clips).contains(where: { $0.id == selected }) {
+            selectedClipID = nil
+        }
+        await reloadComposition()
+    }
+
+    /// Reveal an asset's source file in Finder.
+    func revealAssetInFinder(_ id: MediaAsset.ID) {
+        guard let asset = project.assets.first(where: { $0.id == id }) else { return }
+        Task {
+            guard let url = try? await resolver.resolve(asset) else { return }
+            await MainActor.run {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+        }
+    }
+
+    /// Toggle mute on a clip. Stores the previous volume on a per-clip flag so
+    /// un-muting restores the original level.
+    func toggleClipMuted(_ id: Clip.ID) {
+        updateClip(id) { clip in
+            if clip.volume > 0 {
+                clip.volume = 0
+            } else {
+                clip.volume = 1
+            }
+        }
+        Task { await reloadComposition() }
+    }
+
+    /// Move a clip horizontally along its track. Clamped between the previous
+    /// clip's end (or 0) and the next clip's start minus this clip's duration,
+    /// so reposition can't overlap neighbors. After moving, clips on the track
+    /// are re-sorted by start time so adjacency math stays consistent.
+    func moveClip(_ id: Clip.ID, toStart newStart: TimeInterval) {
+        for trackIndex in project.timeline.tracks.indices {
+            guard let clipIndex = project.timeline.tracks[trackIndex].clips.firstIndex(where: { $0.id == id }) else {
+                continue
+            }
+            var clip = project.timeline.tracks[trackIndex].clips[clipIndex]
+            let duration = clip.timeRange.duration
+            let clips = project.timeline.tracks[trackIndex].clips
+            let lowerBound: TimeInterval = clipIndex > 0 ? clips[clipIndex - 1].timeRange.end : 0
+            let upperBound: TimeInterval = clipIndex + 1 < clips.count
+                ? max(lowerBound, clips[clipIndex + 1].timeRange.start - duration)
+                : .greatestFiniteMagnitude
+            var clamped = max(lowerBound, min(newStart, upperBound))
+
+            // Snap to neighbour edges, the timeline origin, and the playhead
+            // when within tolerance — magnetic feel during drag-end.
+            let snapTolerance: TimeInterval = 0.08
+            var snapTargets: [TimeInterval] = [0, lowerBound]
+            if upperBound.isFinite { snapTargets.append(upperBound) }
+            let playheadStart = playback.currentTime
+            let playheadAsTrailing = playheadStart - duration
+            snapTargets.append(playheadStart)
+            if playheadAsTrailing >= lowerBound { snapTargets.append(playheadAsTrailing) }
+
+            if let best = snapTargets
+                .filter({ $0 >= lowerBound && $0 <= upperBound })
+                .min(by: { abs($0 - clamped) < abs($1 - clamped) }),
+               abs(best - clamped) <= snapTolerance {
+                clamped = best
+            }
+
+            clip.timeRange = TimeRange(start: clamped, duration: duration)
+            project.timeline.tracks[trackIndex].clips[clipIndex] = clip
+            project.timeline.tracks[trackIndex].clips.sort { $0.timeRange.start < $1.timeRange.start }
+            return
         }
     }
 

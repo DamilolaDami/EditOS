@@ -8,7 +8,7 @@ struct LibraryPanel: View {
 
     @State private var isImporterPresented = false
 
-    private let columns = [GridItem(.adaptive(minimum: 96, maximum: 140), spacing: 8)]
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 2)
 
     var body: some View {
         EditorPanel {
@@ -21,7 +21,7 @@ struct LibraryPanel: View {
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: theme.spacing.sm) {
                             ForEach(model.project.assets) { asset in
-                                MediaAssetCell(asset: asset)
+                                MediaAssetCell(asset: asset, model: model)
                             }
                         }
                         .padding(theme.spacing.sm)
@@ -91,22 +91,81 @@ struct LibraryPanel: View {
 
 private struct MediaAssetCell: View {
     @Environment(\.theme) private var theme
+    @Environment(AppEnvironment.self) private var environment
     let asset: MediaAsset
+    @Bindable var model: EditorViewModel
+
+    @State private var thumbnail: CGImage?
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacing.xxs) {
-            RoundedRectangle(cornerRadius: theme.radius.sm)
-                .fill(theme.colors.surfaceElevated)
-                .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                .overlay {
+            ZStack {
+                RoundedRectangle(cornerRadius: theme.radius.sm)
+                    .fill(theme.colors.surfaceElevated)
+                if let thumbnail {
+                    // Use .fit so vertical/horizontal source frames keep their
+                    // native aspect inside the uniform grid cell, with the
+                    // surface color filling the letterbox gaps.
+                    Image(decorative: thumbnail, scale: 1)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else {
                     Image(systemName: icon(for: asset.kind))
-                        .font(.system(size: 22))
+                        .font(.system(size: 18))
                         .foregroundStyle(theme.colors.textSecondary)
                 }
+            }
+            .aspectRatio(1, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: theme.radius.sm))
             Text(asset.displayName)
                 .font(theme.typography.caption)
                 .foregroundStyle(theme.colors.textPrimary)
                 .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .contentShape(Rectangle())
+        // Drag source — payload is the asset's UUID string; the timeline drop
+        // destination looks the asset back up by id and adds a clip for it.
+        .draggable(asset.id.uuidString) {
+            DragPreview(asset: asset, thumbnail: thumbnail)
+        }
+        .contextMenu {
+            Button {
+                model.placeAsset(asset, atTime: model.playback.currentTime)
+                Task { await model.reloadComposition() }
+            } label: {
+                Label("Add to Timeline", systemImage: "plus.rectangle.on.rectangle")
+            }
+            Button {
+                model.revealAssetInFinder(asset.id)
+            } label: {
+                Label("Show in Finder", systemImage: "folder")
+            }
+            Divider()
+            Button(role: .destructive) {
+                Task { await model.removeAsset(asset.id) }
+            } label: {
+                Label("Remove from Library", systemImage: "trash")
+            }
+        }
+        .task(id: asset.id) {
+            await loadThumbnail()
+        }
+    }
+
+    private func loadThumbnail() async {
+        guard asset.kind == .video || asset.kind == .image else { return }
+        do {
+            let url = try await environment.assetResolver.resolve(asset)
+            let image = await environment.thumbnailGenerator.poster(
+                for: url,
+                at: 0,
+                size: CGSize(width: 320, height: 320)
+            )
+            guard !Task.isCancelled else { return }
+            thumbnail = image
+        } catch {
+            // No thumbnail; the icon fallback stays.
         }
     }
 
@@ -116,5 +175,28 @@ private struct MediaAssetCell: View {
         case .audio: "waveform"
         case .image: "photo"
         }
+    }
+}
+
+private struct DragPreview: View {
+    @Environment(\.theme) private var theme
+    let asset: MediaAsset
+    let thumbnail: CGImage?
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(theme.colors.surfaceElevated)
+            if let thumbnail {
+                Image(decorative: thumbnail, scale: 1)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            } else {
+                Image(systemName: asset.kind == .video ? "film" : (asset.kind == .audio ? "waveform" : "photo"))
+                    .foregroundStyle(theme.colors.textSecondary)
+            }
+        }
+        .frame(width: 72, height: 72)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 }

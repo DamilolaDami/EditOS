@@ -25,6 +25,7 @@ final class PlaybackEngine {
     func load(_ result: CompositionResult) {
         let item = AVPlayerItem(asset: result.composition)
         item.audioMix = result.audioMix
+        item.videoComposition = result.videoComposition
         player.replaceCurrentItem(with: item)
         duration = result.composition.duration.seconds
     }

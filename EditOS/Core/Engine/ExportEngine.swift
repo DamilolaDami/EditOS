@@ -23,13 +23,15 @@ actor ExportEngine {
         }
     }
 
-    func export(composition: AVComposition, settings: Settings) async throws {
-        guard let session = AVAssetExportSession(asset: composition, presetName: settings.preset) else {
+    func export(_ result: CompositionResult, settings: Settings) async throws {
+        guard let session = AVAssetExportSession(asset: result.composition, presetName: settings.preset) else {
             throw ExportError.noExportSession
         }
         session.outputURL = settings.outputURL
         session.outputFileType = settings.fileType
         session.shouldOptimizeForNetworkUse = true
+        session.videoComposition = result.videoComposition
+        session.audioMix = result.audioMix
 
         await session.export()
 

@@ -21,6 +21,7 @@ struct TimelinePanel: View {
                                     pixelsPerSecond: pixelsPerSecond,
                                     onScrub: { time in scrub(to: time) }
                                 )
+                                CoverLane(model: model)
                                 ForEach(model.project.timeline.tracks) { track in
                                     TimelineTrackRow(
                                         track: track,
@@ -28,19 +29,44 @@ struct TimelinePanel: View {
                                         assets: model.project.assets,
                                         selectedClipID: model.selectedClipID,
                                         onSelectClip: { model.selectClip($0) },
-                                        onTrimLeading: { id, x in
-                                            let newStart = max(0, Double(x / pixelsPerSecond))
-                                            model.trimLeading(id, to: newStart)
-                                        },
-                                        onTrimTrailing: { id, x in
-                                            let newEnd = max(0, Double(x / pixelsPerSecond))
-                                            model.trimTrailing(id, to: newEnd)
+                                        onTrim: { id, edge, time in
+                                            switch edge {
+                                            case .leading:
+                                                model.trimLeading(id, to: time)
+                                            case .trailing:
+                                                model.trimTrailing(id, to: time)
+                                            }
                                         },
                                         onTrimEnded: {
                                             Task { await model.reloadComposition() }
-                                        }
+                                        },
+                                        onMove: { id, newStart in
+                                            model.moveClip(id, toStart: newStart)
+                                        },
+                                        onMoveEnded: {
+                                            Task { await model.reloadComposition() }
+                                        },
+                                        onScrubEmpty: { time in scrub(to: time) }
                                     )
                                 }
+                                // Empty area below the last track — scrub here too,
+                                // CapCut-style. Clips never live here so this never
+                                // steals input from a clip body.
+                                Rectangle()
+                                    .fill(Color.clear)
+                                    .frame(minHeight: 80)
+                                    .contentShape(Rectangle())
+                                    .gesture(
+                                        DragGesture(
+                                            minimumDistance: 0,
+                                            coordinateSpace: .named(TimelineCoordinateSpace.name)
+                                        )
+                                        .onChanged { value in
+                                            model.selectClip(nil)
+                                            let t = max(0, Double(value.location.x / pixelsPerSecond))
+                                            scrub(to: min(t, timelineDuration))
+                                        }
+                                    )
                             }
                             TimelinePlayhead(
                                 time: model.playback.currentTime,
@@ -53,7 +79,27 @@ struct TimelinePanel: View {
                         // applied outside so drag locations match content x cleanly.
                         .coordinateSpace(name: TimelineCoordinateSpace.name)
                         .padding(theme.spacing.sm)
-                        .frame(minWidth: proxy.size.width, minHeight: proxy.size.height)
+                        .frame(
+                            minWidth: proxy.size.width,
+                            minHeight: proxy.size.height,
+                            alignment: .topLeading
+                        )
+                        .dropDestination(for: String.self) { items, location in
+                            // location is in this padded view's local coords;
+                            // subtract the leading padding so x=0 lines up with
+                            // timeline time 0.
+                            let pad = theme.spacing.sm
+                            let x = max(0, location.x - pad)
+                            let dropTime = Double(x / pixelsPerSecond)
+                            for raw in items {
+                                guard let assetID = UUID(uuidString: raw),
+                                      let asset = model.project.assets.first(where: { $0.id == assetID })
+                                else { continue }
+                                model.placeAsset(asset, atTime: dropTime)
+                            }
+                            Task { await model.reloadComposition() }
+                            return true
+                        }
                     }
                 }
             }
