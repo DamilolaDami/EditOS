@@ -30,7 +30,8 @@ struct TimelinePlayhead: View {
                 .padding(6) // expands the hit target
                 .contentShape(Rectangle())
                 .gesture(
-                    DragGesture(minimumDistance: 0, coordinateSpace: .named(TimelineCoordinateSpace.name))
+                    DragGesture(minimumDistance: 0, coordinateSpace: .named(
+                        TimelineCoordinateSpace.name))
                         .onChanged { value in
                             let t = max(0, Double(value.location.x / pixelsPerSecond))
                             onScrub(min(t, duration))

@@ -19,8 +19,9 @@ struct EditorToolbar: View {
                     }
                 }
                 .padding(.vertical, theme.spacing.sm)
+                .padding(.horizontal, theme.spacing.xs)
             }
         }
-        .frame(width: 72)
+        .frame(width: 78)
     }
 }

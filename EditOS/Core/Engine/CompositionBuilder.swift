@@ -35,10 +35,10 @@ struct CompositionBuilder: Sendable {
         // Collect every visible (track, clip) pair, then insert in chronological
         // order so insertTimeRange's auto-push doesn't re-arrange already-placed
         // clips.
-        var entries: [(kind: Track.Kind, clip: Clip)] = []
+        var entries: [(kind: Track.Kind, isMuted: Bool, clip: Clip)] = []
         for track in project.timeline.tracks where !track.isHidden {
             for clip in track.clips {
-                entries.append((track.kind, clip))
+                entries.append((track.kind, track.isMuted, clip))
             }
         }
         entries.sort { $0.clip.timeRange.start < $1.clip.timeRange.start }
@@ -55,6 +55,7 @@ struct CompositionBuilder: Sendable {
                     clip,
                     asset: AVURLAsset(url: url),
                     kind: entry.kind,
+                    isMuted: entry.isMuted,
                     into: composition,
                     sharedVideoTrack: &sharedVideoTrack,
                     didSetVideoTransform: &didSetVideoTransform,
@@ -85,6 +86,7 @@ struct CompositionBuilder: Sendable {
         _ clip: Clip,
         asset: AVURLAsset,
         kind: Track.Kind,
+        isMuted: Bool,
         into composition: AVMutableComposition,
         sharedVideoTrack: inout AVMutableCompositionTrack?,
         didSetVideoTransform: inout Bool,
@@ -98,6 +100,7 @@ struct CompositionBuilder: Sendable {
         // Video — only for non-audio tracks.
         if kind != .audio {
             let videoTracks = try await asset.loadTracks(withMediaType: .video)
+          
             if let sourceVideo = videoTracks.first {
                 if sharedVideoTrack == nil {
                     sharedVideoTrack = composition.addMutableTrack(

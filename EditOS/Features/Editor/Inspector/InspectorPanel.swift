@@ -10,7 +10,7 @@ struct InspectorPanel: View {
                 header
                 Divider().overlay(theme.colors.border)
                 ScrollView {
-                    VStack(alignment: .leading, spacing: theme.spacing.lg) {
+                    VStack(alignment: .leading, spacing: theme.spacing.md) {
                         if let clip = model.selectedClip {
                             ClipInspector(model: model, clip: clip)
                         } else {
@@ -25,20 +25,28 @@ struct InspectorPanel: View {
     }
 
     private var header: some View {
-        HStack {
-            Text("Details")
+        HStack(spacing: theme.spacing.xs) {
+            Text(model.selectedClip == nil ? "Project" : "Clip")
                 .font(theme.typography.title)
                 .foregroundStyle(theme.colors.textPrimary)
+            if let clip = model.selectedClip {
+                Text(clip.label ?? "Untitled")
+                    .font(theme.typography.caption)
+                    .foregroundStyle(theme.colors.textSecondary)
+                    .lineLimit(1)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(theme.colors.surfaceElevated, in: Capsule())
+            }
             Spacer()
         }
-        .padding(theme.spacing.sm)
+        .padding(theme.spacing.md)
     }
 }
 
-// MARK: - Project inspector (shown when no clip is selected)
+// MARK: - Project inspector
 
 private struct ProjectInspector: View {
-    @Environment(\.theme) private var theme
     let project: Project
 
     var body: some View {
@@ -55,12 +63,11 @@ private struct ProjectInspector: View {
 // MARK: - Clip inspector
 
 private struct ClipInspector: View {
-    @Environment(\.theme) private var theme
     @Bindable var model: EditorViewModel
     let clip: Clip
 
     var body: some View {
-        VStack(alignment: .leading, spacing: theme.spacing.lg) {
+        VStack(alignment: .leading, spacing: 16) {
             InspectorSection(title: "Timing") {
                 InspectorRow(label: "Start", value: String(format: "%.2fs", clip.timeRange.start))
                 InspectorRow(label: "Duration", value: String(format: "%.2fs", clip.timeRange.duration))
@@ -87,7 +94,7 @@ private struct ClipInspector: View {
                     value: clipBinding(\.transform.opacity),
                     range: 0...1,
                     format: { String(format: "%.0f%%", $0 * 100) },
-                    onCommit: nil  // visual-only for now until video composition lands
+                    onCommit: nil
                 )
                 SliderRow(
                     label: "Scale",
@@ -111,11 +118,6 @@ private struct ClipInspector: View {
         Task { await model.reloadComposition() }
     }
 
-    // MARK: - Bindings
-
-    /// Speed must also shrink/expand the clip on the timeline so the change is
-    /// visible. We keep `sourceRange` fixed and let `timeRange.duration` reflect
-    /// the new playback duration.
     private var speedBinding: Binding<Double> {
         let id = clip.id
         return Binding(
@@ -144,7 +146,7 @@ private struct ClipInspector: View {
     }
 
     private func floatBinding(_ keyPath: WritableKeyPath<Clip, Float>) -> Binding<Double> {
-        let inner = clipBinding(keyPath)
+        let inner: Binding<Float> = clipBinding(keyPath)
         return Binding(
             get: { Double(inner.wrappedValue) },
             set: { inner.wrappedValue = Float($0) }
@@ -152,7 +154,7 @@ private struct ClipInspector: View {
     }
 
     private func cgFloatBinding(_ keyPath: WritableKeyPath<Clip, CGFloat>) -> Binding<Double> {
-        let inner = clipBinding(keyPath)
+        let inner: Binding<CGFloat> = clipBinding(keyPath)
         return Binding(
             get: { Double(inner.wrappedValue) },
             set: { inner.wrappedValue = CGFloat($0) }
@@ -160,7 +162,7 @@ private struct ClipInspector: View {
     }
 
     private func degreesBinding(_ keyPath: WritableKeyPath<Clip, Double>) -> Binding<Double> {
-        let inner = clipBinding(keyPath)
+        let inner: Binding<Double> = clipBinding(keyPath)
         return Binding(
             get: { inner.wrappedValue * 180 / .pi },
             set: { inner.wrappedValue = $0 * .pi / 180 }
@@ -172,7 +174,7 @@ private struct ClipInspector: View {
     }
 }
 
-// MARK: - Shared rows
+// MARK: - Shared
 
 private struct InspectorSection<Content: View>: View {
     @Environment(\.theme) private var theme
@@ -182,9 +184,22 @@ private struct InspectorSection<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacing.sm) {
             Text(title.uppercased())
-                .font(theme.typography.caption)
-                .foregroundStyle(theme.colors.textSecondary)
-            content
+                .font(theme.typography.sectionLabel)
+                .foregroundStyle(theme.colors.textTertiary)
+                .tracking(0.8)
+            VStack(alignment: .leading, spacing: theme.spacing.md) {
+                content
+            }
+            .padding(theme.spacing.md)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: theme.radius.md)
+                    .fill(theme.colors.surfaceElevated)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: theme.radius.md)
+                    .stroke(theme.colors.border, lineWidth: 1)
+            )
         }
     }
 }
@@ -226,6 +241,9 @@ private struct SliderRow: View {
                 Text(format(value))
                     .font(theme.typography.displayMono)
                     .foregroundStyle(theme.colors.textPrimary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(theme.colors.surface, in: RoundedRectangle(cornerRadius: 4))
             }
             Slider(
                 value: $value,
@@ -234,6 +252,7 @@ private struct SliderRow: View {
                     if !editing { onCommit?() }
                 }
             )
+            .tint(theme.colors.accent)
         }
     }
 }

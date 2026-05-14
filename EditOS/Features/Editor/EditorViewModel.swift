@@ -62,6 +62,28 @@ final class EditorViewModel {
         project.timeline.tracks[trackIndex].clips.append(clip)
     }
 
+    // MARK: - Track toggles
+
+    func toggleTrackHidden(_ id: Track.ID) {
+        if let index = project.timeline.tracks.firstIndex(where: { $0.id == id }) {
+            project.timeline.tracks[index].isHidden.toggle()
+            Task { await reloadComposition() }
+        }
+    }
+
+    func toggleTrackMuted(_ id: Track.ID) {
+        if let index = project.timeline.tracks.firstIndex(where: { $0.id == id }) {
+            project.timeline.tracks[index].isMuted.toggle()
+            Task { await reloadComposition() }
+        }
+    }
+
+    func toggleTrackLocked(_ id: Track.ID) {
+        if let index = project.timeline.tracks.firstIndex(where: { $0.id == id }) {
+            project.timeline.tracks[index].isLocked.toggle()
+        }
+    }
+
     // MARK: - Mutations
 
     /// Mutates the clip matching `id` and reloads the composition. Use this for
