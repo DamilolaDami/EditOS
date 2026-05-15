@@ -297,47 +297,248 @@ private struct TextLibrary: View {
 
 // MARK: - Sticker library
 
+/// GIPHY-powered sticker browser. Trending results load on appear, and
+/// hitting return on the search field requeries. Tapping a sticker
+/// downloads the GIF and drops it onto the sticker track at the playhead.
 private struct StickerLibrary: View {
     @Environment(\.theme) private var theme
+    @Environment(AppEnvironment.self) private var environment
     @Bindable var model: EditorViewModel
 
-    private let symbols: [String] = [
-        "heart.fill", "star.fill", "bolt.fill", "flame.fill", "sparkles",
-        "hand.thumbsup.fill", "hands.clap", "face.smiling.fill", "party.popper.fill",
-        "checkmark.seal.fill", "xmark.seal.fill", "exclamationmark.triangle.fill",
-        "questionmark.circle.fill", "speaker.wave.3.fill", "music.note", "camera.fill",
-        "location.fill", "moon.stars.fill", "sun.max.fill", "cloud.fill",
-        "cart.fill", "gift.fill", "bell.fill", "crown.fill"
-    ]
+    @State private var query: String = ""
+    @State private var stickers: [GiphyService.Sticker] = []
+    @State private var isLoading: Bool = false
+    @State private var errorMessage: String?
+    @State private var pendingDownloadID: String?
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 2)
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: theme.spacing.sm) {
-                Text("Tap a sticker to drop it at the playhead.")
-                    .font(theme.typography.caption)
-                    .foregroundStyle(theme.colors.textSecondary)
+        VStack(alignment: .leading, spacing: theme.spacing.sm) {
+            searchField
+            statusLine
+            ScrollView {
                 LazyVGrid(columns: columns, spacing: theme.spacing.sm) {
-                    ForEach(symbols, id: \.self) { name in
-                        Button {
-                            model.placeSticker(name, atTime: model.playback.currentTime)
-                        } label: {
-                            Image(systemName: name)
-                                .font(.system(size: 22))
-                                .foregroundStyle(theme.colors.textPrimary)
-                                .frame(width: 44, height: 44)
-                                .background(
-                                    RoundedRectangle(cornerRadius: theme.radius.sm)
-                                        .fill(theme.colors.surfaceElevated)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .help(name)
+                    ForEach(stickers) { sticker in
+                        StickerCell(
+                            sticker: sticker,
+                            isLoading: pendingDownloadID == sticker.id,
+                            onAddToTimeline: { Task { await place(sticker) } },
+                            onDownload: { Task { await downloadOnly(sticker) } }
+                        )
                     }
                 }
+                .padding(.horizontal, theme.spacing.sm)
+                .padding(.bottom, theme.spacing.sm)
             }
-            .padding(theme.spacing.sm)
         }
+        .padding(.horizontal, theme.spacing.sm)
+        .task {
+            await loadTrending()
+        }
+    }
+
+    private var searchField: some View {
+        HStack(spacing: theme.spacing.xs) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(theme.colors.textSecondary)
+            TextField("Search GIPHY", text: $query)
+                .textFieldStyle(.plain)
+                .onSubmit {
+                    Task { await runSearch(query) }
+                }
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                    Task { await loadTrending() }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(theme.colors.textTertiary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, theme.spacing.sm)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: theme.radius.sm)
+                .fill(theme.colors.surfaceElevated)
+        )
+    }
+
+    @ViewBuilder
+    private var statusLine: some View {
+        if isLoading {
+            HStack(spacing: theme.spacing.xs) {
+                ProgressView().controlSize(.small)
+                Text("Loading stickers…")
+                    .font(theme.typography.caption)
+                    .foregroundStyle(theme.colors.textSecondary)
+            }
+        } else if let errorMessage {
+            Text(errorMessage)
+                .font(theme.typography.caption)
+                .foregroundStyle(theme.colors.danger)
+        } else {
+            Text(query.isEmpty ? "Trending stickers" : "Results for \"\(query)\"")
+                .font(theme.typography.caption)
+                .foregroundStyle(theme.colors.textSecondary)
+        }
+    }
+
+    private func loadTrending() async {
+        await runSearch("")
+    }
+
+    private func runSearch(_ q: String) async {
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+        do {
+            stickers = try await environment.giphyService.search(query: q)
+            if stickers.isEmpty {
+                errorMessage = "No stickers found."
+            }
+        } catch {
+            stickers = []
+            // Surface the real error during development so the entitlement /
+            // network problem is visible rather than a generic message.
+            errorMessage = "GIPHY: \(String(describing: error))"
+        }
+    }
+
+    private func place(_ sticker: GiphyService.Sticker) async {
+        pendingDownloadID = sticker.id
+        defer { pendingDownloadID = nil }
+        do {
+            let url = try await environment.giphyService.download(sticker)
+            await MainActor.run {
+                model.placeStickerImage(
+                    localPath: url.path,
+                    displayName: sticker.title,
+                    atTime: model.playback.currentTime
+                )
+                environment.projectStore.update(model.project)
+            }
+        } catch {
+            errorMessage = "Couldn't download that sticker."
+        }
+    }
+
+    private func downloadOnly(_ sticker: GiphyService.Sticker) async {
+        pendingDownloadID = sticker.id
+        defer { pendingDownloadID = nil }
+        do {
+            _ = try await environment.giphyService.download(sticker)
+        } catch {
+            errorMessage = "Couldn't download that sticker."
+        }
+    }
+}
+
+private struct StickerCell: View {
+    @Environment(\.theme) private var theme
+    let sticker: GiphyService.Sticker
+    let isLoading: Bool
+    let onAddToTimeline: () -> Void
+    let onDownload: () -> Void
+
+    @State private var isFavorited: Bool = false
+    @State private var isHovering: Bool = false
+
+    var body: some View {
+        ZStack {
+            // Preview surface
+            RoundedRectangle(cornerRadius: theme.radius.sm)
+                .fill(theme.colors.surfaceElevated)
+            AsyncImage(url: sticker.previewURL) { phase in
+                switch phase {
+                case .empty:
+                    ProgressView().controlSize(.small)
+                case .success(let image):
+                    image
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .padding(8)
+                case .failure:
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(theme.colors.textTertiary)
+                @unknown default:
+                    EmptyView()
+                }
+            }
+
+            if isLoading {
+                Color.black.opacity(0.45)
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.white)
+            }
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: theme.radius.sm))
+        .overlay(alignment: .topLeading) {
+            // Star toggle — UI-only favourite state for now.
+            cornerBadge(
+                systemImage: isFavorited ? "star.fill" : "star",
+                tint: isFavorited ? theme.colors.warning : .white,
+                help: isFavorited ? "Remove from favorites" : "Add to favorites"
+            ) {
+                isFavorited.toggle()
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            // Download (secondary) and Add-to-timeline (primary accent) sit
+            // together in the corner so the sticker preview stays fully
+            // visible behind them.
+            HStack(spacing: 6) {
+                cornerBadge(
+                    systemImage: "arrow.down.to.line",
+                    tint: .white,
+                    help: "Download"
+                ) {
+                    onDownload()
+                }
+                Button(action: onAddToTimeline) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 12, weight: .heavy))
+                        .foregroundStyle(.white)
+                        .frame(width: 26, height: 26)
+                        .background(theme.colors.accent, in: Circle())
+                        .shadow(color: .black.opacity(0.4), radius: 3, y: 1)
+                        .scaleEffect(isHovering ? 1.08 : 1.0)
+                }
+                .buttonStyle(.plain)
+                .help("Add to timeline")
+            }
+            .padding(5)
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: theme.radius.sm)
+                .stroke(isHovering ? theme.colors.borderEmphasis : Color.clear, lineWidth: 1)
+        )
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.15)) {
+                isHovering = hovering
+            }
+        }
+    }
+
+    private func cornerBadge(
+        systemImage: String,
+        tint: Color,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 22, height: 22)
+                .background(Color.black.opacity(0.55), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .padding(5)
+        .help(help)
     }
 }

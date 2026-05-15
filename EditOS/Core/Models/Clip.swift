@@ -21,6 +21,9 @@ struct Clip: Identifiable, Hashable, Sendable, Codable {
     var text: String?
     /// SF Symbol name when the clip lives on a `.sticker` track.
     var stickerSymbol: String?
+    /// Absolute file path to a downloaded sticker image (e.g. a GIPHY GIF).
+    /// Takes precedence over `stickerSymbol` when present.
+    var stickerImagePath: String?
     /// Color used by text/sticker clips when rendering on the canvas.
     var foregroundColor: ColorRGBA?
     /// Font / sticker size in canvas points.
@@ -37,6 +40,7 @@ struct Clip: Identifiable, Hashable, Sendable, Codable {
         label: String? = nil,
         text: String? = nil,
         stickerSymbol: String? = nil,
+        stickerImagePath: String? = nil,
         foregroundColor: ColorRGBA? = nil,
         overlaySize: CGFloat? = nil
     ) {
@@ -50,6 +54,7 @@ struct Clip: Identifiable, Hashable, Sendable, Codable {
         self.label = label
         self.text = text
         self.stickerSymbol = stickerSymbol
+        self.stickerImagePath = stickerImagePath
         self.foregroundColor = foregroundColor
         self.overlaySize = overlaySize
     }

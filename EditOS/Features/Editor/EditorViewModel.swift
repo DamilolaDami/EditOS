@@ -6,16 +6,55 @@ import Observation
 @Observable
 final class EditorViewModel {
     var project: Project
-    var selectedClipID: Clip.ID?
+    /// Multi-selection backing store. Single-selection callers go through
+    /// `selectedClipID` which mirrors the first member.
+    var selectedClipIDs: Set<Clip.ID> = []
     var selectedTool: ToolCategory = .media
     var isLibraryVisible: Bool = true
     var isInspectorVisible: Bool = true
     var zoom: Double = 1.0
     /// Magnet-on/off — when off, dragging clips skips edge-snap completely.
     var snapEnabled: Bool = true
+    /// Path of the most recent successful export; powers the top bar Share button.
+    var lastExportedURL: URL?
+
+    // In-memory clipboard. Stored with track kinds so a paste can route to
+    // the right track type (video / audio / caption / sticker).
+    struct ClipboardEntry: Sendable {
+        let kind: Track.Kind
+        let clip: Clip
+    }
+    private var clipboard: [ClipboardEntry] = []
+    var hasClipboard: Bool { !clipboard.isEmpty }
 
     let playback: PlaybackEngine
     private let resolver: AssetResolver
+
+    // MARK: - Undo / Redo
+    //
+    // Each high-level mutation calls `recordSnapshot()` before mutating, which
+    // pushes a Codable snapshot of `project` onto `undoStack`. Calls within
+    // `snapshotCoalesceWindow` of the previous snapshot are skipped, so a
+    // continuous drag (trim / slider) collapses into a single undo step
+    // instead of dozens.
+    private var undoStack: [Data] = []
+    private var redoStack: [Data] = []
+    private var lastSnapshotAt: Date = .distantPast
+    private let snapshotCoalesceWindow: TimeInterval = 0.45
+    private let maxUndoDepth: Int = 64
+    private let snapshotEncoder: JSONEncoder = {
+        let e = JSONEncoder()
+        e.dateEncodingStrategy = .iso8601
+        return e
+    }()
+    private let snapshotDecoder: JSONDecoder = {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .iso8601
+        return d
+    }()
+
+    var canUndo: Bool { !undoStack.isEmpty }
+    var canRedo: Bool { !redoStack.isEmpty }
 
     init(project: Project, resolver: AssetResolver) {
         self.project = project
@@ -25,8 +64,83 @@ final class EditorViewModel {
 
     // MARK: - Selection
 
+    /// Single-selection convenience. Reading returns the primary (first)
+    /// member of `selectedClipIDs`. Writing replaces the selection set.
+    var selectedClipID: Clip.ID? {
+        get { selectedClipIDs.first }
+        set {
+            if let newValue {
+                selectedClipIDs = [newValue]
+            } else {
+                selectedClipIDs.removeAll()
+            }
+        }
+    }
+
+    /// Replace selection with the given clip (or clear if nil).
     func selectClip(_ id: Clip.ID?) {
-        selectedClipID = id
+        if let id {
+            selectedClipIDs = [id]
+        } else {
+            selectedClipIDs.removeAll()
+        }
+    }
+
+    /// ⌘-click behaviour: add to / remove from the selection set.
+    func toggleClipSelection(_ id: Clip.ID) {
+        if selectedClipIDs.contains(id) {
+            selectedClipIDs.remove(id)
+        } else {
+            selectedClipIDs.insert(id)
+        }
+    }
+
+    func isClipSelected(_ id: Clip.ID) -> Bool {
+        selectedClipIDs.contains(id)
+    }
+
+    // MARK: - Snapshots
+
+    /// Pushes a copy of `project` onto the undo stack. Calls in quick
+    /// succession (e.g. trim drag onChanged ticks) are dropped so one drag
+    /// becomes one undo step. Caller pattern: invoke before mutating.
+    func recordSnapshot() {
+        let now = Date()
+        if now.timeIntervalSince(lastSnapshotAt) < snapshotCoalesceWindow {
+            return
+        }
+        guard let data = try? snapshotEncoder.encode(project) else { return }
+        undoStack.append(data)
+        if undoStack.count > maxUndoDepth { undoStack.removeFirst() }
+        redoStack.removeAll()
+        lastSnapshotAt = now
+    }
+
+    func undo() {
+        guard let snapshot = undoStack.popLast() else { return }
+        if let currentData = try? snapshotEncoder.encode(project) {
+            redoStack.append(currentData)
+        }
+        applySnapshot(snapshot)
+        // Don't coalesce the very next mutation into this snapshot.
+        lastSnapshotAt = .distantPast
+    }
+
+    func redo() {
+        guard let snapshot = redoStack.popLast() else { return }
+        if let currentData = try? snapshotEncoder.encode(project) {
+            undoStack.append(currentData)
+        }
+        applySnapshot(snapshot)
+        lastSnapshotAt = .distantPast
+    }
+
+    private func applySnapshot(_ data: Data) {
+        guard let restored = try? snapshotDecoder.decode(Project.self, from: data) else { return }
+        project = restored
+        let liveIDs = Set(project.timeline.tracks.flatMap(\.clips).map(\.id))
+        selectedClipIDs.formIntersection(liveIDs)
+        Task { await reloadComposition() }
     }
 
     var selectedClip: Clip? {
@@ -49,6 +163,7 @@ final class EditorViewModel {
     // MARK: - Library import
 
     func addAsset(_ asset: MediaAsset) {
+        recordSnapshot()
         // First imported video sets the project canvas to the asset's native
         // size, so the player frame matches the source's real aspect ratio.
         // Later imports just use the canvas that's already there — they
@@ -80,6 +195,7 @@ final class EditorViewModel {
     /// Records a bookmark for the project cover image. The URL is expected to
     /// have an active security scope at call time. Pass `nil` to clear.
     func setCover(from url: URL?) {
+        recordSnapshot()
         guard let url else {
             project.coverBookmark = nil
             return
@@ -94,49 +210,83 @@ final class EditorViewModel {
 
     // MARK: - Overlay clips (text / sticker)
 
-    /// Adds a text overlay clip at `time` on the first caption track,
-    /// creating one if none exists. Default duration is 3 seconds.
+    /// Adds a text overlay clip at `time`, automatically stacking on a new
+    /// caption track if every existing one overlaps at that time. Default
+    /// duration is 3 seconds.
     func placeText(_ text: String, atTime time: TimeInterval, duration: TimeInterval = 3) {
-        ensureTrack(kind: .caption)
-        guard let trackIndex = project.timeline.tracks.firstIndex(where: { $0.kind == .caption }) else { return }
-        let start = freeSlotStart(in: trackIndex, preferred: max(0, time), duration: duration)
+        recordSnapshot()
+        let placement = overlayPlacement(forKind: .caption, preferredStart: max(0, time), duration: duration)
         let clip = Clip(
             assetID: UUID(),  // placeholder — overlay clips don't reference a real asset
-            timeRange: TimeRange(start: start, duration: duration),
+            timeRange: TimeRange(start: placement.start, duration: duration),
             sourceRange: TimeRange(start: 0, duration: duration),
             label: text,
             text: text,
             foregroundColor: .white,
             overlaySize: 64
         )
-        project.timeline.tracks[trackIndex].clips.append(clip)
-        project.timeline.tracks[trackIndex].clips.sort { $0.timeRange.start < $1.timeRange.start }
+        project.timeline.tracks[placement.trackIndex].clips.append(clip)
+        project.timeline.tracks[placement.trackIndex].clips.sort { $0.timeRange.start < $1.timeRange.start }
         selectedClipID = clip.id
     }
 
     /// Adds a sticker overlay clip — `symbol` is an SF Symbol name (e.g. "heart.fill").
+    /// Stacks on a new sticker lane when the existing ones are busy at `time`.
     func placeSticker(_ symbol: String, atTime time: TimeInterval, duration: TimeInterval = 3) {
-        ensureTrack(kind: .sticker)
-        guard let trackIndex = project.timeline.tracks.firstIndex(where: { $0.kind == .sticker }) else { return }
-        let start = freeSlotStart(in: trackIndex, preferred: max(0, time), duration: duration)
+        recordSnapshot()
+        let placement = overlayPlacement(forKind: .sticker, preferredStart: max(0, time), duration: duration)
         let clip = Clip(
             assetID: UUID(),
-            timeRange: TimeRange(start: start, duration: duration),
+            timeRange: TimeRange(start: placement.start, duration: duration),
             sourceRange: TimeRange(start: 0, duration: duration),
             label: symbol,
             stickerSymbol: symbol,
             foregroundColor: .white,
             overlaySize: 96
         )
-        project.timeline.tracks[trackIndex].clips.append(clip)
-        project.timeline.tracks[trackIndex].clips.sort { $0.timeRange.start < $1.timeRange.start }
+        project.timeline.tracks[placement.trackIndex].clips.append(clip)
+        project.timeline.tracks[placement.trackIndex].clips.sort { $0.timeRange.start < $1.timeRange.start }
         selectedClipID = clip.id
     }
 
-    private func ensureTrack(kind: Track.Kind) {
-        if !project.timeline.tracks.contains(where: { $0.kind == kind }) {
-            project.timeline.tracks.append(Track(kind: kind))
+    /// Adds a sticker overlay clip that references a downloaded image file
+    /// (e.g. a GIPHY GIF cached in Application Support).
+    func placeStickerImage(localPath: String, displayName: String, atTime time: TimeInterval, duration: TimeInterval = 3) {
+        recordSnapshot()
+        let placement = overlayPlacement(forKind: .sticker, preferredStart: max(0, time), duration: duration)
+        let trimmedName = displayName.isEmpty ? "Sticker" : displayName
+        let clip = Clip(
+            assetID: UUID(),
+            timeRange: TimeRange(start: placement.start, duration: duration),
+            sourceRange: TimeRange(start: 0, duration: duration),
+            label: trimmedName,
+            stickerImagePath: localPath,
+            foregroundColor: .white,
+            overlaySize: 200
+        )
+        project.timeline.tracks[placement.trackIndex].clips.append(clip)
+        project.timeline.tracks[placement.trackIndex].clips.sort { $0.timeRange.start < $1.timeRange.start }
+        selectedClipID = clip.id
+    }
+
+    /// Picks an existing track of `kind` where the candidate clip fits at
+    /// `preferredStart` without overlapping anything, or appends a new track
+    /// of that kind when every existing lane is busy. Lets the user stack
+    /// multiple overlays at the same timestamp the way CapCut does.
+    private func overlayPlacement(
+        forKind kind: Track.Kind,
+        preferredStart: TimeInterval,
+        duration: TimeInterval
+    ) -> (trackIndex: Int, start: TimeInterval) {
+        let candidate = TimeRange(start: preferredStart, duration: duration)
+        for (index, track) in project.timeline.tracks.enumerated() where track.kind == kind {
+            let overlaps = track.clips.contains { $0.timeRange.intersects(candidate) }
+            if !overlaps {
+                return (index, preferredStart)
+            }
         }
+        project.timeline.tracks.append(Track(kind: kind))
+        return (project.timeline.tracks.count - 1, preferredStart)
     }
 
     // MARK: - Tracks
@@ -144,12 +294,14 @@ final class EditorViewModel {
     /// Appends a new track of the given kind. Sticker / caption / overlay
     /// tracks let the user layer multiple of the same type.
     func addTrack(kind: Track.Kind) {
+        recordSnapshot()
         project.timeline.tracks.append(Track(kind: kind))
     }
 
     /// Remove a track and any composition rebuild that follows. The view
     /// guards against removing the last video track from the UI side.
     func deleteTrack(_ id: Track.ID) {
+        recordSnapshot()
         project.timeline.tracks.removeAll { $0.id == id }
         Task { await reloadComposition() }
     }
@@ -181,6 +333,7 @@ final class EditorViewModel {
     /// Mutates the clip matching `id` and reloads the composition. Use this for
     /// edits that affect the timeline structure (position, source range, speed).
     func updateClip(_ id: Clip.ID, _ mutate: (inout Clip) -> Void) {
+        recordSnapshot()
         for trackIndex in project.timeline.tracks.indices {
             if let clipIndex = project.timeline.tracks[trackIndex].clips.firstIndex(where: { $0.id == id }) {
                 mutate(&project.timeline.tracks[trackIndex].clips[clipIndex])
@@ -193,6 +346,7 @@ final class EditorViewModel {
     /// equivalent amount off the front of the source range so the visible
     /// content stays anchored to the right edge.
     func trimLeading(_ id: Clip.ID, to newStart: TimeInterval) {
+        // No explicit recordSnapshot — updateClip already coalesces.
         updateClip(id) { clip in
             let oldStart = clip.timeRange.start
             let oldEnd = clip.timeRange.end
@@ -226,6 +380,7 @@ final class EditorViewModel {
     /// place its leading edge at `time`. If that overlaps an existing clip the
     /// new clip is appended to the end of the track instead.
     func placeAsset(_ asset: MediaAsset, atTime time: TimeInterval) {
+        recordSnapshot()
         if !project.assets.contains(where: { $0.id == asset.id }) {
             let isFirstVideo = asset.kind == .video
                 && !project.assets.contains { $0.kind == .video }
@@ -264,6 +419,7 @@ final class EditorViewModel {
 
     /// Removes an asset and any clips referencing it.
     func removeAsset(_ id: MediaAsset.ID) async {
+        recordSnapshot()
         project.assets.removeAll { $0.id == id }
         for trackIndex in project.timeline.tracks.indices {
             project.timeline.tracks[trackIndex].clips.removeAll { $0.assetID == id }
@@ -289,6 +445,7 @@ final class EditorViewModel {
     /// Toggle mute on a clip. Stores the previous volume on a per-clip flag so
     /// un-muting restores the original level.
     func toggleClipMuted(_ id: Clip.ID) {
+        recordSnapshot()
         updateClip(id) { clip in
             if clip.volume > 0 {
                 clip.volume = 0
@@ -304,6 +461,7 @@ final class EditorViewModel {
     /// so reposition can't overlap neighbors. After moving, clips on the track
     /// are re-sorted by start time so adjacency math stays consistent.
     func moveClip(_ id: Clip.ID, toStart newStart: TimeInterval) {
+        recordSnapshot()
         for trackIndex in project.timeline.tracks.indices {
             guard let clipIndex = project.timeline.tracks[trackIndex].clips.firstIndex(where: { $0.id == id }) else {
                 continue
@@ -349,6 +507,7 @@ final class EditorViewModel {
     /// "Ripple Delete".
     func rippleDeleteSelectedClip() async {
         guard let id = selectedClipID else { return }
+        recordSnapshot()
         for trackIndex in project.timeline.tracks.indices {
             let clips = project.timeline.tracks[trackIndex].clips
             guard let clipIndex = clips.firstIndex(where: { $0.id == id }) else { continue }
@@ -369,18 +528,15 @@ final class EditorViewModel {
         }
     }
 
+    /// Delete every clip in the current selection set (single or multi).
     func deleteSelectedClip() async {
-        guard let id = selectedClipID else { return }
-        for trackIndex in project.timeline.tracks.indices {
-            project.timeline.tracks[trackIndex].clips.removeAll { $0.id == id }
-        }
-        selectedClipID = nil
-        await reloadComposition()
+        await deleteSelectedClips()
     }
 
     /// Splits the clip under the playhead into two adjacent clips. No-op if
     /// the playhead is at a clip's edge.
     func splitClipAtPlayhead() async {
+        recordSnapshot()
         let time = playback.currentTime
         for trackIndex in project.timeline.tracks.indices {
             let clips = project.timeline.tracks[trackIndex].clips
@@ -453,5 +609,141 @@ final class EditorViewModel {
         } catch {
             // Composition couldn't be built; preview stays empty.
         }
+    }
+
+    /// Build a fresh composition for export. Caller is responsible for keeping
+    /// the resolver alive while the export session runs (we already do — the
+    /// resolver is stored on this view model for the editor's lifetime).
+    func buildComposition() async throws -> CompositionResult {
+        let builder = CompositionBuilder()
+        return try await builder.build(project, assetResolver: resolver)
+    }
+
+    // MARK: - Clipboard
+
+    /// Snapshot the selected clips to an in-memory clipboard, keyed by their
+    /// host track kind so paste can route back to the correct lane.
+    func copySelection() {
+        var entries: [ClipboardEntry] = []
+        for track in project.timeline.tracks {
+            for clip in track.clips where selectedClipIDs.contains(clip.id) {
+                entries.append(ClipboardEntry(kind: track.kind, clip: clip))
+            }
+        }
+        guard !entries.isEmpty else { return }
+        clipboard = entries
+    }
+
+    /// Paste clipboard contents at the playhead. Preserves relative timing
+    /// between multiple copied clips and stacks onto new lanes when busy.
+    func paste() async {
+        guard !clipboard.isEmpty else { return }
+        recordSnapshot()
+        let base = playback.currentTime
+        let earliest = clipboard.map { $0.clip.timeRange.start }.min() ?? 0
+        var newIDs: Set<Clip.ID> = []
+        for entry in clipboard {
+            let original = entry.clip
+            let relativeStart = original.timeRange.start - earliest
+            let preferredStart = max(0, base + relativeStart)
+            let placement = overlayPlacement(
+                forKind: entry.kind,
+                preferredStart: preferredStart,
+                duration: original.timeRange.duration
+            )
+            let copy = original.duplicateForCopy(
+                placedAt: placement.start
+            )
+            project.timeline.tracks[placement.trackIndex].clips.append(copy)
+            project.timeline.tracks[placement.trackIndex].clips
+                .sort { $0.timeRange.start < $1.timeRange.start }
+            newIDs.insert(copy.id)
+        }
+        selectedClipIDs = newIDs
+        await reloadComposition()
+    }
+
+    /// Copy + paste in one shot — useful as a ⌘D shortcut.
+    func duplicateSelection() async {
+        copySelection()
+        await paste()
+    }
+
+    func cutSelection() async {
+        copySelection()
+        await deleteSelectedClips()
+    }
+
+    /// Multi-clip delete that respects the full selection set.
+    func deleteSelectedClips() async {
+        guard !selectedClipIDs.isEmpty else { return }
+        recordSnapshot()
+        let ids = selectedClipIDs
+        for trackIndex in project.timeline.tracks.indices {
+            project.timeline.tracks[trackIndex].clips.removeAll { ids.contains($0.id) }
+        }
+        selectedClipIDs.removeAll()
+        await reloadComposition()
+    }
+
+    // MARK: - Project metadata
+
+    /// Rename the project; whitespace-only input is ignored.
+    func renameProject(to newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != project.name else { return }
+        recordSnapshot()
+        project.name = trimmed
+    }
+
+    /// Update the project canvas to a new size, preserving frame rate.
+    func setCanvasSize(_ size: CGSize) {
+        guard size.width > 0, size.height > 0, size != project.canvas.size else { return }
+        recordSnapshot()
+        project.canvas.size = size
+    }
+
+    // MARK: - Tracks (reorder + lock helpers)
+
+    /// Move a track up or down in the stack by one position.
+    func moveTrack(_ id: Track.ID, byOffset offset: Int) {
+        guard let index = project.timeline.tracks.firstIndex(where: { $0.id == id }) else { return }
+        let target = index + offset
+        guard target >= 0, target < project.timeline.tracks.count, target != index else { return }
+        recordSnapshot()
+        let track = project.timeline.tracks.remove(at: index)
+        project.timeline.tracks.insert(track, at: target)
+    }
+
+    /// True when the clip's host track is locked (clip cannot be moved or trimmed).
+    func isClipLocked(_ id: Clip.ID) -> Bool {
+        for track in project.timeline.tracks {
+            if track.clips.contains(where: { $0.id == id }) {
+                return track.isLocked
+            }
+        }
+        return false
+    }
+}
+
+private extension Clip {
+    /// Returns a copy with a fresh UUID and the time range moved to `start`.
+    /// Used by the clipboard and ⌘D duplicate path.
+    func duplicateForCopy(placedAt start: TimeInterval) -> Clip {
+        Clip(
+            id: UUID(),
+            assetID: assetID,
+            timeRange: TimeRange(start: start, duration: timeRange.duration),
+            sourceRange: sourceRange,
+            transform: transform,
+            volume: volume,
+            speed: speed,
+            label: label,
+            text: text,
+            stickerSymbol: stickerSymbol,
+            stickerImagePath: stickerImagePath,
+            foregroundColor: foregroundColor,
+            overlaySize: overlaySize
+        )
     }
 }

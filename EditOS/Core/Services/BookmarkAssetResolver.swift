@@ -24,7 +24,7 @@ actor BookmarkAssetResolver: AssetResolver {
         }
 
         guard let bookmark = asset.bookmark else {
-            Self.log.error("Asset \(asset.id, privacy: .public) has no bookmark")
+            await Self.log.error("Asset \(asset.id, privacy: .public) has no bookmark")
             throw ResolveError.missingBookmark(asset.id)
         }
         var isStale = false
@@ -35,15 +35,15 @@ actor BookmarkAssetResolver: AssetResolver {
             bookmarkDataIsStale: &isStale
         )
         if isStale {
-            Self.log.error("Bookmark stale for \(asset.id, privacy: .public)")
+            await Self.log.error("Bookmark stale for \(asset.id, privacy: .public)")
             throw ResolveError.staleBookmark(asset.id)
         }
         guard url.startAccessingSecurityScopedResource() else {
-            Self.log.error("Access denied for \(url.path, privacy: .public)")
+            await Self.log.error("Access denied for \(url.path, privacy: .public)")
             throw ResolveError.accessDenied(url)
         }
         cache[asset.id] = url
-        Self.log.info("Resolved \(asset.displayName, privacy: .public) -> \(url.path, privacy: .public)")
+        await Self.log.info("Resolved \(asset.displayName, privacy: .public) -> \(url.path, privacy: .public)")
         return url
     }
 

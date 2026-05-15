@@ -14,6 +14,7 @@ struct TimelineTrackRow: View {
     let selectedClipID: Clip.ID?
     let playheadTime: TimeInterval
     let onSelectClip: (Clip.ID) -> Void
+    let onToggleSelectClip: (Clip.ID) -> Void
     /// Sets the edge of `id` to the given timeline time (seconds).
     let onTrim: (Clip.ID, TimelineTrimEdge, TimeInterval) -> Void
     let onTrimEnded: () -> Void
@@ -65,8 +66,9 @@ struct TimelineTrackRow: View {
                     width: width,
                     pixelsPerSecond: pixelsPerSecond,
                     tint: track.kind.color(in: theme),
-                    isSelected: selectedClipID == clip.id,
+                    isSelected: model.isClipSelected(clip.id),
                     isCompact: isCompactRow,
+                    isTrackLocked: track.isLocked,
                     snapCandidates: snapTargets,
                     onTrimLeading: { x in
                         let time = max(0, Double(x / pixelsPerSecond))
@@ -93,7 +95,8 @@ struct TimelineTrackRow: View {
                     },
                     onMoveEnded: onMoveEnded,
                     onSnapPreview: onSnapPreview,
-                    onSelect: { onSelectClip(clip.id) }
+                    onSelect: { onSelectClip(clip.id) },
+                    onToggleSelect: { onToggleSelectClip(clip.id) }
                 )
                 .contextMenu {
                     Button {
@@ -152,6 +155,9 @@ struct TimelineClipView: View {
     /// Skips filmstrip + waveform and lays the label inline so the clip stays
     /// readable at ~26pt tall.
     var isCompact: Bool = false
+    /// True when the host track is locked — disables move/trim drags so the
+    /// lock toggle in the header column actually does something.
+    var isTrackLocked: Bool = false
     /// Times this clip should snap to while being dragged.
     let snapCandidates: [TimeInterval]
     let onTrimLeading: (CGFloat) -> Void
@@ -164,6 +170,8 @@ struct TimelineClipView: View {
     /// a snap line under the playhead.
     let onSnapPreview: (TimeInterval?) -> Void
     let onSelect: () -> Void
+    /// ⌘-click: toggle this clip's membership in the multi-selection set.
+    let onToggleSelect: () -> Void
 
     @State private var thumbnails: [CGImage] = []
     @State private var waveformSamples: [Float] = []
@@ -237,7 +245,11 @@ struct TimelineClipView: View {
         }
         .overlay(alignment: isCompact ? .leading : .topLeading) {
             HStack(spacing: 4) {
-                if let symbol = clip.stickerSymbol {
+                if let path = clip.stickerImagePath {
+                    StickerFileImage(path: path, size: 16)
+                        .frame(width: 16, height: 16)
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                } else if let symbol = clip.stickerSymbol {
                     Image(systemName: symbol)
                         .font(.system(size: 10, weight: .bold))
                 } else if clip.text != nil {
@@ -252,7 +264,7 @@ struct TimelineClipView: View {
                     .lineLimit(1)
             }
             .foregroundStyle(.white)
-            .padding(.horizontal, isCompact ? 6 : 6)
+            .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(
                 isCompact ? Color.clear : Color.black.opacity(0.55),
@@ -288,23 +300,30 @@ struct TimelineClipView: View {
         .shadow(color: .black.opacity(isDragging ? 0.4 : 0), radius: isDragging ? 6 : 0, y: isDragging ? 2 : 0)
         .onHover { hovering in
             // Open-hand cursor over the clip body so users know they can grab
-            // it. Trim handles override with resizeLeftRight on their hover.
+            // it. Locked tracks show the no-entry cursor so the user
+            // immediately understands why drags do nothing.
             if hovering {
-                (isDragging ? NSCursor.closedHand : NSCursor.openHand).set()
+                if isTrackLocked {
+                    NSCursor.operationNotAllowed.set()
+                } else {
+                    (isDragging ? NSCursor.closedHand : NSCursor.openHand).set()
+                }
             } else {
                 NSCursor.arrow.set()
             }
         }
-        // Body drag — moves the clip horizontally. minimumDistance > 0 so a
-        // pure tap doesn't trigger move, leaving room for the tap-select below.
+        // Body drag — moves the clip horizontally. Short-circuits on locked
+        // tracks so the lock toggle in the header actually prevents edits.
         .gesture(
             DragGesture(minimumDistance: 4)
                 .onChanged { value in
+                    guard !isTrackLocked else { return }
                     isDragging = true
                     dragOffset = value.translation.width
                     onSnapPreview(snapTarget(forPixelDelta: value.translation.width))
                 }
                 .onEnded { value in
+                    guard !isTrackLocked else { return }
                     let delta = value.translation.width
                     dragOffset = 0
                     isDragging = false
@@ -315,7 +334,13 @@ struct TimelineClipView: View {
                     }
                 }
         )
-        .onTapGesture { onSelect() }
+        .onTapGesture {
+            if NSEvent.modifierFlags.contains(.command) {
+                onToggleSelect()
+            } else {
+                onSelect()
+            }
+        }
         .task(id: thumbnailKey) {
             await loadThumbnails()
         }

@@ -85,8 +85,9 @@ struct PreviewPanel: View {
 }
 
 /// Renders text and sticker overlay clips active at the current playhead time
-/// on top of the player view. Scales canvas-space sizing into the preview's
-/// rendered rect.
+/// on top of the player view. Each overlay is independently selectable,
+/// movable (drag body) and resizable (drag corner handle) — clicks on
+/// empty space fall through to the parent so tap-out-to-deselect still works.
 private struct OverlayCanvas: View {
     @Bindable var model: EditorViewModel
 
@@ -98,11 +99,31 @@ private struct OverlayCanvas: View {
                 : 1.0
             ZStack {
                 ForEach(activeOverlays, id: \.id) { clip in
-                    view(for: clip, scale: scale)
+                    OverlayItem(
+                        clip: clip,
+                        canvasScale: scale,
+                        isSelected: model.selectedClipID == clip.id,
+                        onSelectAndPause: {
+                            model.selectClip(clip.id)
+                            model.playback.pause()
+                        },
+                        onMoveCommit: { canvasDelta in
+                            model.updateClip(clip.id) { c in
+                                c.transform.translation = CGSize(
+                                    width: c.transform.translation.width + canvasDelta.width,
+                                    height: c.transform.translation.height + canvasDelta.height
+                                )
+                            }
+                        },
+                        onResizeCommit: { newSize in
+                            model.updateClip(clip.id) { c in
+                                c.overlaySize = max(16, newSize)
+                            }
+                        }
+                    )
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
-            .allowsHitTesting(false)
         }
     }
 
@@ -119,22 +140,82 @@ private struct OverlayCanvas: View {
         }
         return clips
     }
+}
+
+/// One overlay clip rendered on the preview canvas. Handles its own select /
+/// move / resize gestures and shows a dashed selection box when selected.
+private struct OverlayItem: View {
+    @Environment(\.theme) private var theme
+    let clip: Clip
+    let canvasScale: CGFloat
+    let isSelected: Bool
+    let onSelectAndPause: () -> Void
+    let onMoveCommit: (CGSize) -> Void
+    let onResizeCommit: (CGFloat) -> Void
+
+    @State private var dragOffset: CGSize = .zero
+    @State private var resizeDelta: CGFloat = 0
+
+    private let handleDiameter: CGFloat = 12
+
+    var body: some View {
+        let baseSize = clip.overlaySize ?? (clip.text != nil ? 64 : 96)
+        let canvasSize = max(16, baseSize + resizeDelta)
+        let tx = clip.transform.translation.width * canvasScale + dragOffset.width
+        let ty = clip.transform.translation.height * canvasScale + dragOffset.height
+
+        // Content sizes to its own intrinsic bounds — fixed-size frames clip
+        // text overlays. The selection box reads back the content size via
+        // an overlay GeometryReader so handles always sit on the corners of
+        // the rendered glyphs / image, not on an arbitrary square.
+        content(canvasSize: canvasSize)
+            .fixedSize()
+            .contentShape(Rectangle())
+            .overlay {
+                if isSelected {
+                    GeometryReader { proxy in
+                        selectionBox(size: proxy.size)
+                    }
+                }
+            }
+            .offset(x: tx, y: ty)
+            .onTapGesture { onSelectAndPause() }
+            .simultaneousGesture(
+                // Body drag — selects on first touch, then commits the
+                // canvas-space delta on release. Local dragOffset gives
+                // live feedback.
+                DragGesture(minimumDistance: 3)
+                    .onChanged { value in
+                        if !isSelected { onSelectAndPause() }
+                        dragOffset = value.translation
+                    }
+                    .onEnded { value in
+                        let delta = CGSize(
+                            width: value.translation.width / max(0.001, canvasScale),
+                            height: value.translation.height / max(0.001, canvasScale)
+                        )
+                        dragOffset = .zero
+                        onMoveCommit(delta)
+                    }
+            )
+    }
 
     @ViewBuilder
-    private func view(for clip: Clip, scale: CGFloat) -> some View {
-        let baseSize = clip.overlaySize ?? (clip.text != nil ? 64 : 96)
+    private func content(canvasSize: CGFloat) -> some View {
         let color = swiftUIColor(clip.foregroundColor ?? .white)
-        let dx = clip.transform.translation.width * scale
-        let dy = clip.transform.translation.height * scale
+        let renderPt = max(8, canvasSize * canvasScale)
         Group {
             if let text = clip.text {
                 Text(text)
-                    .font(.system(size: max(8, baseSize * scale), weight: .bold))
+                    .font(.system(size: renderPt, weight: .bold))
                     .foregroundStyle(color)
                     .shadow(color: .black.opacity(0.5), radius: 4, y: 1)
+            } else if let path = clip.stickerImagePath {
+                StickerFileImage(path: path, size: renderPt)
+                    .shadow(color: .black.opacity(0.35), radius: 4, y: 1)
             } else if let symbol = clip.stickerSymbol {
                 Image(systemName: symbol)
-                    .font(.system(size: max(8, baseSize * scale), weight: .bold))
+                    .font(.system(size: renderPt, weight: .bold))
                     .foregroundStyle(color)
                     .shadow(color: .black.opacity(0.5), radius: 4, y: 1)
             }
@@ -142,11 +223,82 @@ private struct OverlayCanvas: View {
         .opacity(clip.transform.opacity)
         .rotationEffect(.radians(clip.transform.rotation))
         .scaleEffect(clip.transform.scale)
-        .offset(x: dx, y: dy)
+    }
+
+    private func selectionBox(size: CGSize) -> some View {
+        ZStack {
+            Rectangle()
+                .stroke(.white.opacity(0.95), style: StrokeStyle(lineWidth: 1.25, dash: [4, 3]))
+                .frame(width: size.width, height: size.height)
+                .allowsHitTesting(false)
+            // Four visual dots at each corner.
+            ForEach(0..<4, id: \.self) { idx in
+                let isResize = idx == 3  // bottom-right is the active resize handle
+                Circle()
+                    .fill(.white)
+                    .overlay(Circle().stroke(theme.colors.accent, lineWidth: 1.5))
+                    .frame(width: handleDiameter, height: handleDiameter)
+                    .position(handlePosition(for: idx, in: size))
+                    .allowsHitTesting(isResize)
+                    .gesture(
+                        isResize
+                        ? DragGesture(minimumDistance: 1)
+                            .onChanged { value in
+                                let avg = (value.translation.width + value.translation.height) / 2
+                                resizeDelta = avg / max(0.001, canvasScale)
+                            }
+                            .onEnded { value in
+                                let avg = (value.translation.width + value.translation.height) / 2
+                                let delta = avg / max(0.001, canvasScale)
+                                let base = clip.overlaySize ?? 64
+                                resizeDelta = 0
+                                onResizeCommit(base + delta)
+                            }
+                        : nil
+                    )
+            }
+        }
+        .frame(width: size.width, height: size.height)
+    }
+
+    private func handlePosition(for index: Int, in size: CGSize) -> CGPoint {
+        switch index {
+        case 0: return CGPoint(x: 0, y: 0)                          // top-leading
+        case 1: return CGPoint(x: size.width, y: 0)                 // top-trailing
+        case 2: return CGPoint(x: 0, y: size.height)                // bottom-leading
+        default: return CGPoint(x: size.width, y: size.height)      // bottom-trailing
+        }
     }
 
     private func swiftUIColor(_ rgba: ColorRGBA) -> Color {
         Color(red: rgba.red, green: rgba.green, blue: rgba.blue, opacity: rgba.alpha)
+    }
+}
+
+/// Loads a GIF / PNG / WebP sticker from disk once per path change and
+/// renders the first decoded frame. Doing the load inside a `.task(id:)`
+/// keeps each render cheap when the playhead ticks. File-scope so both the
+/// preview canvas and the timeline cell can use the same cached view.
+struct StickerFileImage: View {
+    let path: String
+    let size: CGFloat
+    @State private var image: NSImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+            } else {
+                Color.clear
+            }
+        }
+        .frame(width: max(8, size), height: max(8, size))
+        .task(id: path) {
+            image = NSImage(contentsOfFile: path)
+        }
     }
 }
 

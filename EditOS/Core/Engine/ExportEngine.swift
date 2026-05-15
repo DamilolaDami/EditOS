@@ -23,7 +23,11 @@ actor ExportEngine {
         }
     }
 
-    func export(_ result: CompositionResult, settings: Settings) async throws {
+    func export(
+        _ result: CompositionResult,
+        settings: Settings,
+        onProgress: @escaping @Sendable (Float) -> Void = { _ in }
+    ) async throws {
         guard let session = AVAssetExportSession(asset: result.composition, presetName: settings.preset) else {
             throw ExportError.noExportSession
         }
@@ -32,10 +36,23 @@ actor ExportEngine {
         session.shouldOptimizeForNetworkUse = true
         session.audioMix = result.audioMix
 
+        // Poll progress while the session runs so callers can drive a UI bar.
+        let progressTask = Task.detached { [weak session] in
+            while !Task.isCancelled {
+                guard let session else { return }
+                let status = session.status
+                guard status == .waiting || status == .exporting else { return }
+                onProgress(session.progress)
+                try? await Task.sleep(nanoseconds: 120_000_000)
+            }
+        }
+
         await session.export()
+        progressTask.cancel()
 
         switch session.status {
         case .completed:
+            onProgress(1.0)
             return
         case .cancelled:
             throw ExportError.cancelled

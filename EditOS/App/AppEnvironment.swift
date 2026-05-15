@@ -12,18 +12,24 @@ final class AppEnvironment {
     let thumbnailGenerator: ThumbnailGenerator
     let waveformGenerator: WaveformGenerator
     let assetResolver: BookmarkAssetResolver
+    let giphyService: GiphyService
+    let exportEngine: ExportEngine
 
     init(
         projectStore: ProjectStore? = nil,
         mediaImporter: MediaImporter = MediaImporter(),
         thumbnailGenerator: ThumbnailGenerator = ThumbnailGenerator(),
         waveformGenerator: WaveformGenerator = WaveformGenerator(),
-        assetResolver: BookmarkAssetResolver = BookmarkAssetResolver()
+        assetResolver: BookmarkAssetResolver = BookmarkAssetResolver(),
+        giphyService: GiphyService = GiphyService(apiKey: APIKeys.giphy),
+        exportEngine: ExportEngine = ExportEngine()
     ) {
         self.projectStore = projectStore ?? .live()
         self.mediaImporter = mediaImporter
         self.thumbnailGenerator = thumbnailGenerator
         self.waveformGenerator = waveformGenerator
         self.assetResolver = assetResolver
+        self.giphyService = giphyService
+        self.exportEngine = exportEngine
     }
 }

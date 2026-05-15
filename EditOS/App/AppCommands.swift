@@ -15,6 +15,48 @@ struct AppCommands: Commands {
             .keyboardShortcut("n", modifiers: .command)
         }
 
+        CommandGroup(replacing: .undoRedo) {
+            Button("Undo") {
+                editorModel?.undo()
+            }
+            .keyboardShortcut("z", modifiers: .command)
+            .disabled(!(editorModel?.canUndo ?? false))
+
+            Button("Redo") {
+                editorModel?.redo()
+            }
+            .keyboardShortcut("z", modifiers: [.command, .shift])
+            .disabled(!(editorModel?.canRedo ?? false))
+        }
+
+        // Replace the system pasteboard commands so we operate on clips
+        // inside the editor without touching app-global text behaviour.
+        CommandGroup(replacing: .pasteboard) {
+            Button("Cut") {
+                if let editorModel { Task { await editorModel.cutSelection() } }
+            }
+            .keyboardShortcut("x", modifiers: .command)
+            .disabled(editorModel?.selectedClipIDs.isEmpty ?? true)
+
+            Button("Copy") {
+                editorModel?.copySelection()
+            }
+            .keyboardShortcut("c", modifiers: .command)
+            .disabled(editorModel?.selectedClipIDs.isEmpty ?? true)
+
+            Button("Paste") {
+                if let editorModel { Task { await editorModel.paste() } }
+            }
+            .keyboardShortcut("v", modifiers: .command)
+            .disabled(!(editorModel?.hasClipboard ?? false))
+
+            Button("Duplicate") {
+                if let editorModel { Task { await editorModel.duplicateSelection() } }
+            }
+            .keyboardShortcut("d", modifiers: .command)
+            .disabled(editorModel?.selectedClipIDs.isEmpty ?? true)
+        }
+
         CommandMenu("Playback") {
             Button(editorModel?.playback.isPlaying == true ? "Pause" : "Play") {
                 editorModel?.playback.togglePlayback()

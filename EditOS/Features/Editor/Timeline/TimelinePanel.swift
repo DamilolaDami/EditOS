@@ -142,7 +142,8 @@ struct TimelinePanel: View {
                                 assets: model.project.assets,
                                 selectedClipID: model.selectedClipID,
                                 playheadTime: model.playback.currentTime,
-                                onSelectClip: { model.selectClip($0) },
+                                onSelectClip: { model.selectClip($0) }, onToggleSelectClip: {clip in
+                                },
                                 onTrim: { id, edge, time in
                                     switch edge {
                                     case .leading:
@@ -280,12 +281,16 @@ private struct TimelineToolbar: View {
 
     var body: some View {
         HStack(spacing: theme.spacing.md) {
-            Button { } label: { Image(systemName: "arrow.uturn.backward") }
-                .disabled(true)
-                .help("Undo (coming soon)")
-            Button { } label: { Image(systemName: "arrow.uturn.forward") }
-                .disabled(true)
-                .help("Redo (coming soon)")
+            Button {
+                model.undo()
+            } label: { Image(systemName: "arrow.uturn.backward") }
+                .disabled(!model.canUndo)
+                .help("Undo (⌘Z)")
+            Button {
+                model.redo()
+            } label: { Image(systemName: "arrow.uturn.forward") }
+                .disabled(!model.canRedo)
+                .help("Redo (⌘⇧Z)")
             Button {
                 Task { await model.splitClipAtPlayhead() }
             } label: { Image(systemName: "scissors") }

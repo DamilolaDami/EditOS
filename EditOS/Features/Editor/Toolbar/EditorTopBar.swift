@@ -6,12 +6,20 @@ import SwiftUI
 struct EditorTopBar: View {
     @Environment(\.theme) private var theme
     @Bindable var model: EditorViewModel
+    @State private var isExportSheetPresented: Bool = false
     /// Distance reserved on the leading edge so the macOS traffic lights
     /// (close / minimize / zoom) sit cleanly without overlapping content.
     private let trafficLightInset: CGFloat = 78
     private let height: CGFloat = 40
 
     var body: some View {
+        baseLayout
+            .sheet(isPresented: $isExportSheetPresented) {
+                ExportSheet(model: model)
+            }
+    }
+
+    private var baseLayout: some View {
         ZStack {
             // Centered project name — placed in its own ZStack layer so the
             // flexible HStack on top doesn't pull it off centre.
@@ -107,7 +115,7 @@ struct EditorTopBar: View {
 
     private var exportButton: some View {
         Button {
-            // Stub — fires ExportEngine in a follow-up.
+            isExportSheetPresented = true
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "square.and.arrow.up.fill")
