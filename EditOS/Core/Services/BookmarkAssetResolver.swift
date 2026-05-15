@@ -38,7 +38,13 @@ actor BookmarkAssetResolver: AssetResolver {
             await Self.log.error("Bookmark stale for \(asset.id, privacy: .public)")
             throw ResolveError.staleBookmark(asset.id)
         }
-        guard url.startAccessingSecurityScopedResource() else {
+        // Files in the app's own container (Application Support, Caches —
+        // e.g. downloaded Freesound MP3s and GIPHY GIFs) often return false
+        // from startAccessingSecurityScopedResource because there's no
+        // user-granted scope to enter, even though the file is readable.
+        // Fall back to a plain readability check so those assets resolve.
+        let didStartScope = url.startAccessingSecurityScopedResource()
+        if !didStartScope && !FileManager.default.isReadableFile(atPath: url.path) {
             await Self.log.error("Access denied for \(url.path, privacy: .public)")
             throw ResolveError.accessDenied(url)
         }

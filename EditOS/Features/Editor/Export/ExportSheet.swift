@@ -518,6 +518,7 @@ struct ExportSheet: View {
                         self.progress = Double(value)
                     }
                 }
+                model.lastExportedURL = outputURL
                 phase = .finished(outputURL)
             } catch is CancellationError {
                 phase = .configuring

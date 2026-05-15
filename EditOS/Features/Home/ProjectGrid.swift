@@ -41,6 +41,9 @@ struct ProjectCard: View {
 
     @State private var isHovering = false
     @State private var thumbnail: CGImage?
+    @State private var isRenaming = false
+    @State private var draftName: String = ""
+    @FocusState private var nameFocused: Bool
 
     var body: some View {
         Button(action: onOpen) {
@@ -88,13 +91,44 @@ struct ProjectCard: View {
                             .stroke(isHovering ? theme.colors.accent.opacity(0.6) : theme.colors.border, lineWidth: 1)
                     )
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(project.name)
-                        .font(theme.typography.bodyEmphasized)
-                        .foregroundStyle(theme.colors.textPrimary)
-                        .lineLimit(1)
+                    if isRenaming {
+                        TextField("Project name", text: $draftName)
+                            .textFieldStyle(.plain)
+                            .font(theme.typography.bodyEmphasized)
+                            .focused($nameFocused)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                            .background(theme.colors.surface, in: RoundedRectangle(cornerRadius: 4))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(theme.colors.accent.opacity(0.6), lineWidth: 1)
+                            )
+                            .onSubmit { commitRename() }
+                            .onExitCommand { isRenaming = false }
+                            .onChange(of: nameFocused) { _, focused in
+                                if !focused { commitRename() }
+                            }
+                    } else {
+                        Text(project.name)
+                            .font(theme.typography.bodyEmphasized)
+                            .foregroundStyle(theme.colors.textPrimary)
+                            .lineLimit(1)
+                            .contentShape(Rectangle())
+                            .onTapGesture(count: 2) { beginRename() }
+                    }
                     Text(project.modifiedAt, format: .relative(presentation: .named))
                         .font(theme.typography.caption)
                         .foregroundStyle(theme.colors.textSecondary)
+                }
+                .contextMenu {
+                    Button("Rename") { beginRename() }
+                    Button("Show in Finder") {
+                        // Future: surface the project's .editos file.
+                    }
+                    Divider()
+                    Button(role: .destructive) {
+                        environment.projectStore.delete(project)
+                    } label: { Text("Delete Project") }
                 }
             }
             .padding(theme.spacing.sm)
@@ -154,6 +188,21 @@ struct ProjectCard: View {
         guard let nsImage = NSImage(contentsOf: url) else { return nil }
         var rect = CGRect(origin: .zero, size: nsImage.size)
         return nsImage.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+    }
+
+    private func beginRename() {
+        draftName = project.name
+        isRenaming = true
+        DispatchQueue.main.async { nameFocused = true }
+    }
+
+    private func commitRename() {
+        defer { isRenaming = false }
+        let trimmed = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != project.name else { return }
+        var updated = project
+        updated.name = trimmed
+        environment.projectStore.update(updated)
     }
 
     private func loadFirstVideoPoster() async -> CGImage? {

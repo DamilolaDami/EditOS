@@ -13,6 +13,7 @@ final class AppEnvironment {
     let waveformGenerator: WaveformGenerator
     let assetResolver: BookmarkAssetResolver
     let giphyService: GiphyService
+    let freesoundService: FreesoundService
     let exportEngine: ExportEngine
 
     init(
@@ -22,6 +23,7 @@ final class AppEnvironment {
         waveformGenerator: WaveformGenerator = WaveformGenerator(),
         assetResolver: BookmarkAssetResolver = BookmarkAssetResolver(),
         giphyService: GiphyService = GiphyService(apiKey: APIKeys.giphy),
+        freesoundService: FreesoundService = FreesoundService(token: APIKeys.freesound),
         exportEngine: ExportEngine = ExportEngine()
     ) {
         self.projectStore = projectStore ?? .live()
@@ -30,6 +32,7 @@ final class AppEnvironment {
         self.waveformGenerator = waveformGenerator
         self.assetResolver = assetResolver
         self.giphyService = giphyService
+        self.freesoundService = freesoundService
         self.exportEngine = exportEngine
     }
 }

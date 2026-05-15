@@ -43,11 +43,7 @@ struct PreviewPanel: View {
                 .padding(.vertical, 2)
                 .background(theme.colors.surfaceElevated, in: Capsule())
             Spacer()
-            Button {} label: {
-                Image(systemName: "rectangle.ratio.4.to.3")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(theme.colors.textSecondary)
+            aspectRatioMenu
             Button {} label: {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
             }
@@ -56,6 +52,44 @@ struct PreviewPanel: View {
         }
         .padding(.horizontal, theme.spacing.md)
         .padding(.vertical, theme.spacing.sm)
+    }
+
+    /// Quick aspect ratio switcher — picks the matching long-edge resolution
+    /// so 16:9 → 1920×1080, 9:16 → 1080×1920, etc. Keeping the long edge at
+    /// 1920 keeps export presets meaningful.
+    private var aspectRatioMenu: some View {
+        Menu {
+            ForEach(AspectChoice.allCases, id: \.self) { choice in
+                Button {
+                    model.setCanvasSize(choice.size)
+                } label: {
+                    Label(choice.label, systemImage: choice.symbol)
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: currentAspectChoice.symbol)
+                Text(currentAspectChoice.label)
+                    .font(theme.typography.caption)
+            }
+            .foregroundStyle(theme.colors.textSecondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(theme.colors.surfaceElevated, in: RoundedRectangle(cornerRadius: 5))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(width: 78)
+        .help("Aspect ratio")
+    }
+
+    private var currentAspectChoice: AspectChoice {
+        let size = model.project.canvas.size
+        guard size.height > 0 else { return .widescreen16x9 }
+        let ratio = size.width / size.height
+        return AspectChoice.allCases.min { a, b in
+            abs(a.ratio - ratio) < abs(b.ratio - ratio)
+        } ?? .widescreen16x9
     }
 
     private var canvasLabel: String {
@@ -81,6 +115,51 @@ struct PreviewPanel: View {
         let size = model.project.canvas.size
         guard size.height > 0 else { return 16.0 / 9.0 }
         return size.width / size.height
+    }
+}
+
+private enum AspectChoice: CaseIterable, Hashable {
+    case widescreen16x9
+    case vertical9x16
+    case square1x1
+    case portrait4x5
+
+    var label: String {
+        switch self {
+        case .widescreen16x9: return "16:9"
+        case .vertical9x16:   return "9:16"
+        case .square1x1:      return "1:1"
+        case .portrait4x5:    return "4:5"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .widescreen16x9: return "rectangle"
+        case .vertical9x16:   return "rectangle.portrait"
+        case .square1x1:      return "square"
+        case .portrait4x5:    return "rectangle.portrait.fill"
+        }
+    }
+
+    var ratio: CGFloat {
+        switch self {
+        case .widescreen16x9: return 16.0 / 9.0
+        case .vertical9x16:   return 9.0 / 16.0
+        case .square1x1:      return 1.0
+        case .portrait4x5:    return 4.0 / 5.0
+        }
+    }
+
+    /// Canvas size at this aspect, with the long edge at 1920 to keep the
+    /// HD / 4K export presets aligned.
+    var size: CGSize {
+        switch self {
+        case .widescreen16x9: return CGSize(width: 1920, height: 1080)
+        case .vertical9x16:   return CGSize(width: 1080, height: 1920)
+        case .square1x1:      return CGSize(width: 1080, height: 1080)
+        case .portrait4x5:    return CGSize(width: 1080, height: 1350)
+        }
     }
 }
 

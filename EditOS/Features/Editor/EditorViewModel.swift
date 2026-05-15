@@ -475,17 +475,36 @@ final class EditorViewModel {
                 : .greatestFiniteMagnitude
             var clamped = max(lowerBound, min(newStart, upperBound))
 
-            // Snap to neighbour edges, the timeline origin, and the playhead
-            // when within tolerance — magnetic feel during drag-end. Skipped
-            // entirely when the user has disabled snap from the toolbar.
+            // Snap to neighbour edges, the timeline origin, the playhead,
+            // *and* the edges of every clip in every other track — so the
+            // dragged clip can align vertically with content on a different
+            // lane the same way it aligns horizontally with its own
+            // neighbours. Skipped entirely when snap is toggled off.
             if snapEnabled {
                 let snapTolerance: TimeInterval = 0.08
-                var snapTargets: [TimeInterval] = [0, lowerBound]
-                if upperBound.isFinite { snapTargets.append(upperBound) }
-                let playheadStart = playback.currentTime
-                let playheadAsTrailing = playheadStart - duration
-                snapTargets.append(playheadStart)
-                if playheadAsTrailing >= lowerBound { snapTargets.append(playheadAsTrailing) }
+
+                // Interesting times: timeline 0, playhead, every other
+                // clip's start/end across all tracks (including same-track
+                // neighbours, which are already covered by lowerBound /
+                // upperBound but harmless to include here).
+                var interestingPoints: [TimeInterval] = [0, lowerBound]
+                if upperBound.isFinite { interestingPoints.append(upperBound) }
+                interestingPoints.append(playback.currentTime)
+                for laneTrack in project.timeline.tracks {
+                    for other in laneTrack.clips where other.id != id {
+                        interestingPoints.append(other.timeRange.start)
+                        interestingPoints.append(other.timeRange.end)
+                    }
+                }
+
+                // Each interesting point yields two candidate placements:
+                // align our leading edge to it, or align our trailing edge
+                // to it (which means new start = point − duration).
+                var snapTargets: [TimeInterval] = []
+                for point in interestingPoints {
+                    snapTargets.append(point)
+                    snapTargets.append(point - duration)
+                }
 
                 if let best = snapTargets
                     .filter({ $0 >= lowerBound && $0 <= upperBound })

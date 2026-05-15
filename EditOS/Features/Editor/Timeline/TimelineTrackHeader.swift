@@ -77,6 +77,19 @@ struct TimelineTrackHeader: View {
                 Label(track.isMuted ? "Unmute Track" : "Mute Track",
                       systemImage: track.isMuted ? "speaker.wave.2" : "speaker.slash")
             }
+            Button {
+                model.toggleTrackLocked(track.id)
+            } label: {
+                Label(track.isLocked ? "Unlock Track" : "Lock Track",
+                      systemImage: track.isLocked ? "lock.open" : "lock")
+            }
+            Divider()
+            Button {
+                model.moveTrack(track.id, byOffset: -1)
+            } label: { Label("Move Up", systemImage: "arrow.up") }
+            Button {
+                model.moveTrack(track.id, byOffset: 1)
+            } label: { Label("Move Down", systemImage: "arrow.down") }
             Divider()
             Button(role: .destructive) {
                 model.deleteTrack(track.id)

@@ -142,8 +142,8 @@ struct TimelinePanel: View {
                                 assets: model.project.assets,
                                 selectedClipID: model.selectedClipID,
                                 playheadTime: model.playback.currentTime,
-                                onSelectClip: { model.selectClip($0) }, onToggleSelectClip: {clip in
-                                },
+                                onSelectClip: { model.selectClip($0) },
+                                onToggleSelectClip: { model.toggleClipSelection($0) },
                                 onTrim: { id, edge, time in
                                     switch edge {
                                     case .leading:

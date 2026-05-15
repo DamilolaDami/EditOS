@@ -70,22 +70,22 @@ struct TimelineTrackRow: View {
                     isCompact: isCompactRow,
                     isTrackLocked: track.isLocked,
                     snapCandidates: snapTargets,
-                    onTrimLeading: { x in
-                        let time = max(0, Double(x / pixelsPerSecond))
+                    onTrimLeading: { time in
+                        let clamped = max(0, time)
                         // CapCut-style joint trim: when the leading edge is
                         // touching the previous clip's trailing edge, drag both
                         // together so there's no gap or overlap.
                         if joinedWithPrev, let prev = previousClip {
-                            onTrim(prev.id, .trailing, time)
+                            onTrim(prev.id, .trailing, clamped)
                         }
-                        onTrim(clip.id, .leading, time)
+                        onTrim(clip.id, .leading, clamped)
                     },
-                    onTrimTrailing: { x in
-                        let time = max(0, Double(x / pixelsPerSecond))
+                    onTrimTrailing: { time in
+                        let clamped = max(0, time)
                         if joinedWithNext, let next = nextClip {
-                            onTrim(next.id, .leading, time)
+                            onTrim(next.id, .leading, clamped)
                         }
-                        onTrim(clip.id, .trailing, time)
+                        onTrim(clip.id, .trailing, clamped)
                     },
                     onTrimEnded: onTrimEnded,
                     onMove: { pixelDelta in
@@ -130,13 +130,18 @@ struct TimelineTrackRow: View {
         .opacity(track.isHidden ? 0.4 : 1.0)
     }
 
-    /// Times the dragged clip can snap to: timeline origin, every other clip's
-    /// edges, and the current playhead.
+    /// Times the dragged clip can snap to: timeline origin, the playhead,
+    /// and every other clip's edges across *every* track — so a clip can
+    /// align vertically with a clip on a different lane, not just within its
+    /// own track. The clip view's snap line spans full height already, so
+    /// these targets light it up at the matching x.
     private func snapCandidates(excluding excludedID: Clip.ID) -> [TimeInterval] {
         var candidates: [TimeInterval] = [0, playheadTime]
-        for other in track.clips where other.id != excludedID {
-            candidates.append(other.timeRange.start)
-            candidates.append(other.timeRange.end)
+        for laneTrack in model.project.timeline.tracks {
+            for other in laneTrack.clips where other.id != excludedID {
+                candidates.append(other.timeRange.start)
+                candidates.append(other.timeRange.end)
+            }
         }
         return candidates
     }
@@ -160,8 +165,10 @@ struct TimelineClipView: View {
     var isTrackLocked: Bool = false
     /// Times this clip should snap to while being dragged.
     let snapCandidates: [TimeInterval]
-    let onTrimLeading: (CGFloat) -> Void
-    let onTrimTrailing: (CGFloat) -> Void
+    /// Called with the new leading-edge time (in seconds) while trimming.
+    let onTrimLeading: (TimeInterval) -> Void
+    /// Called with the new trailing-edge time (in seconds) while trimming.
+    let onTrimTrailing: (TimeInterval) -> Void
     let onTrimEnded: () -> Void
     /// Pixel delta from the start of the body drag.
     let onMove: (CGFloat) -> Void
@@ -283,8 +290,18 @@ struct TimelineClipView: View {
                 .frame(width: handleWidth)
                 .highPriorityGesture(
                     DragGesture(minimumDistance: 1, coordinateSpace: .named(TimelineCoordinateSpace.name))
-                        .onChanged { value in onTrimLeading(value.location.x) }
-                        .onEnded { _ in onTrimEnded() }
+                        .onChanged { value in
+                            guard !isTrackLocked else { return }
+                            let raw = max(0, Double(value.location.x / max(0.001, pixelsPerSecond)))
+                            let snapped = snapTrimEdge(rawTime: raw)
+                            onSnapPreview(abs(snapped - raw) > 0.001 ? snapped : nil)
+                            onTrimLeading(snapped)
+                        }
+                        .onEnded { _ in
+                            guard !isTrackLocked else { return }
+                            onSnapPreview(nil)
+                            onTrimEnded()
+                        }
                 )
         }
         .overlay(alignment: .trailing) {
@@ -292,8 +309,18 @@ struct TimelineClipView: View {
                 .frame(width: handleWidth)
                 .highPriorityGesture(
                     DragGesture(minimumDistance: 1, coordinateSpace: .named(TimelineCoordinateSpace.name))
-                        .onChanged { value in onTrimTrailing(value.location.x) }
-                        .onEnded { _ in onTrimEnded() }
+                        .onChanged { value in
+                            guard !isTrackLocked else { return }
+                            let raw = max(0, Double(value.location.x / max(0.001, pixelsPerSecond)))
+                            let snapped = snapTrimEdge(rawTime: raw)
+                            onSnapPreview(abs(snapped - raw) > 0.001 ? snapped : nil)
+                            onTrimTrailing(snapped)
+                        }
+                        .onEnded { _ in
+                            guard !isTrackLocked else { return }
+                            onSnapPreview(nil)
+                            onTrimEnded()
+                        }
                 )
         }
         .offset(x: dragOffset)
@@ -347,6 +374,26 @@ struct TimelineClipView: View {
         .task(id: waveformKey) {
             await loadWaveform()
         }
+    }
+
+    /// Picks the nearest snap candidate (any other clip's edge across any
+    /// track, timeline origin, or playhead) to the trim handle's raw time.
+    /// Used by both leading and trailing trim — the candidate set is
+    /// symmetric, so the same picker drives both edges. Returns `rawTime`
+    /// unchanged when nothing is within the tolerance.
+    private func snapTrimEdge(rawTime: TimeInterval) -> TimeInterval {
+        guard pixelsPerSecond > 0 else { return rawTime }
+        let tolerance = max(0.04, Double(6 / pixelsPerSecond))
+        var bestCandidate: TimeInterval?
+        var bestDistance = tolerance
+        for candidate in snapCandidates {
+            let distance = abs(candidate - rawTime)
+            if distance < bestDistance {
+                bestCandidate = candidate
+                bestDistance = distance
+            }
+        }
+        return bestCandidate ?? rawTime
     }
 
     /// Picks the snap candidate (clip start *or* clip end) closest to the

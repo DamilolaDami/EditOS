@@ -8,4 +8,5 @@ import Foundation
 /// macOS Keychain. Hard-coded here for development speed only.
 enum APIKeys {
     static let giphy = "lIgPk1nXLrz8kVyTtHxIXmYawHKKjcmz"
+    static let freesound = "QDxUwKIwbm68likTfWvDwgLELAU5RU1qNkpNsaJL"
 }

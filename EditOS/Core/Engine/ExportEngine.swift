@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import OSLog
 
 /// Renders a `Project` to a video file via `AVAssetExportSession`.
 actor ExportEngine {
@@ -8,6 +9,8 @@ actor ExportEngine {
         case cancelled
         case failed(Error?)
     }
+
+    private static let log = Logger(subsystem: "com.damioffice.EditOS", category: "ExportEngine")
 
     struct Settings: Sendable {
         var preset: String
@@ -28,7 +31,36 @@ actor ExportEngine {
         settings: Settings,
         onProgress: @escaping @Sendable (Float) -> Void = { _ in }
     ) async throws {
+        // AVAssetExportSession returns NSURLErrorCannotCreateFile (-3000)
+        // with an inner OSStatus when its parent directory is missing or an
+        // older file at the same path can't be overwritten. Do both
+        // defensively here so the engine never fails on directory state.
+        let parent = settings.outputURL.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(
+                at: parent,
+                withIntermediateDirectories: true
+            )
+        } catch {
+            Self.log.error("createDirectory failed for \(parent.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            throw ExportError.failed(error)
+        }
+        if FileManager.default.fileExists(atPath: settings.outputURL.path) {
+            try? FileManager.default.removeItem(at: settings.outputURL)
+        }
+        // Sanity check: verify the parent is writable before AVFoundation
+        // touches it, because its error message is unhelpfully terse.
+        if !FileManager.default.isWritableFile(atPath: parent.path) {
+            Self.log.error("Parent directory not writable: \(parent.path, privacy: .public)")
+            throw ExportError.failed(NSError(
+                domain: "com.damioffice.EditOS.ExportEngine",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Destination folder isn't writable: \(parent.path)"]
+            ))
+        }
+
         guard let session = AVAssetExportSession(asset: result.composition, presetName: settings.preset) else {
+            Self.log.error("Couldn't construct AVAssetExportSession for preset \(settings.preset, privacy: .public)")
             throw ExportError.noExportSession
         }
         session.outputURL = settings.outputURL
@@ -55,11 +87,40 @@ actor ExportEngine {
             onProgress(1.0)
             return
         case .cancelled:
+            Self.log.error("Export cancelled")
+            print("[ExportEngine] cancelled")
             throw ExportError.cancelled
         case .failed:
+            logFailure(session: session, settings: settings, label: "failed")
             throw ExportError.failed(session.error)
         default:
+            logFailure(session: session, settings: settings, label: "unexpected status \(session.status.rawValue)")
             throw ExportError.failed(session.error)
         }
     }
+
+    /// Surfaces the underlying NSError so failures show in Xcode's console
+    /// and `os_log` instead of disappearing behind `ExportError.failed`.
+    private func logFailure(session: AVAssetExportSession, settings: Settings, label: String) {
+        let underlying = session.error as NSError?
+        let description = underlying?.localizedDescription ?? "<no description>"
+        let domain = underlying?.domain ?? "<no domain>"
+        let code = underlying?.code ?? -1
+        let userInfo = underlying?.userInfo ?? [:]
+
+        Self.log.error(
+            "Export \(label, privacy: .public) — preset=\(settings.preset, privacy: .public), output=\(settings.outputURL.path, privacy: .public), domain=\(domain, privacy: .public), code=\(code, privacy: .public), msg=\(description, privacy: .public)"
+        )
+        // Also drop a stdout line so it's easy to spot in Xcode's debug
+        // console when AVFoundation's error path is opaque.
+        print("""
+        [ExportEngine] \(label)
+          preset:   \(settings.preset)
+          output:   \(settings.outputURL.path)
+          domain:   \(domain) (\(code))
+          message:  \(description)
+          userInfo: \(userInfo)
+        """)
+    }
 }
+
