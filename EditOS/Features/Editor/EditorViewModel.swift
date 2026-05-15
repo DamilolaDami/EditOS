@@ -86,6 +86,11 @@ final class EditorViewModel {
         }
     }
 
+    /// Select every clip across every track. Used by ⌘A.
+    func selectAllClips() {
+        selectedClipIDs = Set(project.timeline.tracks.flatMap(\.clips).map(\.id))
+    }
+
     /// ⌘-click behaviour: add to / remove from the selection set.
     func toggleClipSelection(_ id: Clip.ID) {
         if selectedClipIDs.contains(id) {
@@ -438,6 +443,56 @@ final class EditorViewModel {
             guard let url = try? await resolver.resolve(asset) else { return }
             await MainActor.run {
                 NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+        }
+    }
+
+    /// Drops a filter clip on a `.filter` track at `time`. Stacks onto a new
+    /// filter lane when the existing ones are busy — matches CapCut: filters
+    /// live on their own track and only affect video beneath them while
+    /// active.
+    func placeFilter(_ presetID: String, atTime time: TimeInterval, duration: TimeInterval = 3) {
+        recordSnapshot()
+        let placement = overlayPlacement(forKind: .filter, preferredStart: max(0, time), duration: duration)
+        let displayName = FilterCatalog.find(id: presetID)?.displayName ?? "Filter"
+        let clip = Clip(
+            assetID: UUID(),
+            timeRange: TimeRange(start: placement.start, duration: duration),
+            sourceRange: TimeRange(start: 0, duration: duration),
+            label: displayName,
+            filterPreset: presetID,
+            filterIntensity: 1.0
+        )
+        project.timeline.tracks[placement.trackIndex].clips.append(clip)
+        project.timeline.tracks[placement.trackIndex].clips.sort { $0.timeRange.start < $1.timeRange.start }
+        selectedClipIDs = [clip.id]
+        Task { await reloadComposition() }
+    }
+
+    /// Apply (or clear) a filter on every clip in the current selection. Use
+    /// `presetID = nil` to remove the filter. Triggers a composition reload
+    /// so the player reflects the change immediately.
+    func applyFilter(_ presetID: String?, intensity: Double = 1.0) {
+        guard !selectedClipIDs.isEmpty else { return }
+        recordSnapshot()
+        for trackIndex in project.timeline.tracks.indices {
+            for clipIndex in project.timeline.tracks[trackIndex].clips.indices
+            where selectedClipIDs.contains(project.timeline.tracks[trackIndex].clips[clipIndex].id) {
+                project.timeline.tracks[trackIndex].clips[clipIndex].filterPreset = presetID
+                project.timeline.tracks[trackIndex].clips[clipIndex].filterIntensity = presetID == nil ? nil : intensity
+            }
+        }
+        Task { await reloadComposition() }
+    }
+
+    /// Live-edit the filter strength for the selected clip(s) without
+    /// pushing a snapshot each tick — pair with the inspector slider.
+    func setFilterIntensity(_ value: Double) {
+        for trackIndex in project.timeline.tracks.indices {
+            for clipIndex in project.timeline.tracks[trackIndex].clips.indices
+            where selectedClipIDs.contains(project.timeline.tracks[trackIndex].clips[clipIndex].id) {
+                guard project.timeline.tracks[trackIndex].clips[clipIndex].filterPreset != nil else { continue }
+                project.timeline.tracks[trackIndex].clips[clipIndex].filterIntensity = max(0, min(1, value))
             }
         }
     }

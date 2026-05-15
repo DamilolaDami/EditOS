@@ -26,10 +26,15 @@ struct InspectorPanel: View {
 
     private var header: some View {
         HStack(spacing: theme.spacing.xs) {
-            Text(model.selectedClip == nil ? "Project" : "Clip")
-                .font(theme.typography.title)
-                .foregroundStyle(theme.colors.textPrimary)
             if let clip = model.selectedClip {
+                Image(systemName: clip.kind.headerSymbol)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(theme.colors.accent)
+                    .frame(width: 22, height: 22)
+                    .background(theme.colors.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 6))
+                Text(clip.kind.headerTitle)
+                    .font(theme.typography.title)
+                    .foregroundStyle(theme.colors.textPrimary)
                 Text(clip.label ?? "Untitled")
                     .font(theme.typography.caption)
                     .foregroundStyle(theme.colors.textSecondary)
@@ -37,10 +42,39 @@ struct InspectorPanel: View {
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(theme.colors.surfaceElevated, in: Capsule())
+            } else {
+                Image(systemName: "rectangle.stack.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(theme.colors.accent)
+                    .frame(width: 22, height: 22)
+                    .background(theme.colors.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 6))
+                Text("Project")
+                    .font(theme.typography.title)
+                    .foregroundStyle(theme.colors.textPrimary)
             }
             Spacer()
         }
         .padding(theme.spacing.md)
+    }
+}
+
+private extension Clip.Kind {
+    var headerTitle: String {
+        switch self {
+        case .media: "Clip"
+        case .text: "Text"
+        case .sticker: "Sticker"
+        case .filter: "Filter"
+        }
+    }
+
+    var headerSymbol: String {
+        switch self {
+        case .media: "film"
+        case .text: "textformat"
+        case .sticker: "face.smiling"
+        case .filter: "wand.and.stars"
+        }
     }
 }
 
@@ -63,17 +97,39 @@ private struct ProjectInspector: View {
 // MARK: - Clip inspector
 
 private struct ClipInspector: View {
+    @Environment(\.theme) private var theme
     @Bindable var model: EditorViewModel
     let clip: Clip
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            if clip.text != nil || clip.stickerSymbol != nil {
-                overlaySection
+            switch clip.kind {
+            case .text:
+                textSection
+                timingSection(showSpeed: false)
+                transformSection
+            case .sticker:
+                stickerSection
+                timingSection(showSpeed: false)
+                transformSection
+            case .filter:
+                filterSection
+                timingSection(showSpeed: false)
+            case .media:
+                timingSection(showSpeed: true)
+                audioSection
+                transformSection
             }
-            InspectorSection(title: "Timing") {
-                InspectorRow(label: "Start", value: String(format: "%.2fs", clip.timeRange.start))
-                InspectorRow(label: "Duration", value: String(format: "%.2fs", clip.timeRange.duration))
+        }
+    }
+
+    // MARK: - Sections per kind
+
+    private func timingSection(showSpeed: Bool) -> some View {
+        InspectorSection(title: "Timing", systemImage: "clock") {
+            InspectorRow(label: "Start", value: String(format: "%.2fs", clip.timeRange.start))
+            InspectorRow(label: "Duration", value: String(format: "%.2fs", clip.timeRange.duration))
+            if showSpeed {
                 SliderRow(
                     label: "Speed",
                     value: speedBinding,
@@ -82,61 +138,76 @@ private struct ClipInspector: View {
                     onCommit: reload
                 )
             }
-            InspectorSection(title: "Audio") {
-                SliderRow(
-                    label: "Volume",
-                    value: floatBinding(\.volume),
-                    range: 0...1,
-                    format: { String(format: "%.0f%%", $0 * 100) },
-                    onCommit: reload
-                )
-                MuteToggleRow(
-                    isMuted: (currentClip(clip.id)?.volume ?? clip.volume) == 0,
-                    onToggle: {
-                        model.toggleClipMuted(clip.id)
-                    }
-                )
-            }
-            InspectorSection(title: "Transform") {
-                SliderRow(
-                    label: "Opacity",
-                    value: clipBinding(\.transform.opacity),
-                    range: 0...1,
-                    format: { String(format: "%.0f%%", $0 * 100) },
-                    onCommit: nil
-                )
-                SliderRow(
-                    label: "Scale",
-                    value: cgFloatBinding(\.transform.scale),
-                    range: 0.1...4.0,
-                    format: { String(format: "%.2f×", $0) },
-                    onCommit: nil
-                )
-                SliderRow(
-                    label: "Rotation",
-                    value: degreesBinding(\.transform.rotation),
-                    range: -180...180,
-                    format: { String(format: "%.0f°", $0) },
-                    onCommit: nil
-                )
-            }
         }
     }
 
-    @ViewBuilder
-    private var overlaySection: some View {
-        InspectorSection(title: clip.stickerSymbol != nil ? "Sticker" : "Text") {
-            if clip.text != nil {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Content")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 90, alignment: .leading)
-                    TextField("Text", text: textBinding)
-                        .textFieldStyle(.roundedBorder)
-                }
+    private var audioSection: some View {
+        InspectorSection(title: "Audio", systemImage: "speaker.wave.2.fill") {
+            SliderRow(
+                label: "Volume",
+                value: floatBinding(\.volume),
+                range: 0...1,
+                format: { String(format: "%.0f%%", $0 * 100) },
+                onCommit: reload
+            )
+            MuteToggleRow(
+                isMuted: (currentClip(clip.id)?.volume ?? clip.volume) == 0,
+                onToggle: { model.toggleClipMuted(clip.id) }
+            )
+        }
+    }
+
+    private var transformSection: some View {
+        InspectorSection(title: "Transform", systemImage: "arrow.up.left.and.arrow.down.right") {
+            SliderRow(
+                label: "Opacity",
+                value: clipBinding(\.transform.opacity),
+                range: 0...1,
+                format: { String(format: "%.0f%%", $0 * 100) },
+                onCommit: nil
+            )
+            SliderRow(
+                label: "Scale",
+                value: cgFloatBinding(\.transform.scale),
+                range: 0.1...4.0,
+                format: { String(format: "%.2f×", $0) },
+                onCommit: nil
+            )
+            SliderRow(
+                label: "Rotation",
+                value: degreesBinding(\.transform.rotation),
+                range: -180...180,
+                format: { String(format: "%.0f°", $0) },
+                onCommit: nil
+            )
+        }
+    }
+
+    private var textSection: some View {
+        InspectorSection(title: "Text", systemImage: "textformat") {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Content")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 90, alignment: .leading)
+                TextField("Text", text: textBinding)
+                    .textFieldStyle(.roundedBorder)
             }
-            if clip.stickerSymbol != nil {
+            SliderRow(
+                label: "Size",
+                value: overlaySizeBinding,
+                range: 16...240,
+                format: { String(format: "%.0f pt", $0) },
+                onCommit: nil
+            )
+        }
+    }
+
+    private var stickerSection: some View {
+        InspectorSection(title: "Sticker", systemImage: "face.smiling") {
+            if clip.stickerImagePath != nil {
+                InspectorRow(label: "Source", value: "GIPHY")
+            } else if clip.stickerSymbol != nil {
                 HStack(alignment: .firstTextBaseline) {
                     Text("Symbol")
                         .font(.system(size: 12))
@@ -149,11 +220,61 @@ private struct ClipInspector: View {
             SliderRow(
                 label: "Size",
                 value: overlaySizeBinding,
-                range: 16...240,
+                range: 32...400,
                 format: { String(format: "%.0f pt", $0) },
                 onCommit: nil
             )
         }
+    }
+
+    private var filterSection: some View {
+        InspectorSection(title: "Filter", systemImage: "wand.and.stars") {
+            HStack(spacing: 8) {
+                Image(systemName: filterSymbol)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(theme.colors.accent)
+                    .frame(width: 28, height: 28)
+                    .background(theme.colors.accent.opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(filterName)
+                        .font(theme.typography.bodyEmphasized)
+                        .foregroundStyle(theme.colors.textPrimary)
+                    Text("Affects video beneath this clip")
+                        .font(theme.typography.caption)
+                        .foregroundStyle(theme.colors.textSecondary)
+                }
+                Spacer(minLength: 0)
+            }
+            SliderRow(
+                label: "Intensity",
+                value: filterIntensityBinding,
+                range: 0...1,
+                format: { String(format: "%.0f%%", $0 * 100) },
+                onCommit: reload
+            )
+        }
+    }
+
+    private var filterName: String {
+        guard let id = clip.filterPreset else { return "Filter" }
+        return FilterCatalog.find(id: id)?.displayName ?? "Filter"
+    }
+
+    private var filterSymbol: String {
+        guard let id = clip.filterPreset else { return "wand.and.stars" }
+        return FilterCatalog.find(id: id)?.symbol ?? "wand.and.stars"
+    }
+
+    private var filterIntensityBinding: Binding<Double> {
+        let id = clip.id
+        return Binding(
+            get: { currentClip(id)?.filterIntensity ?? 1.0 },
+            set: { newValue in
+                model.updateClip(id) { c in
+                    c.filterIntensity = max(0, min(1, newValue))
+                }
+            }
+        )
     }
 
     private var textBinding: Binding<String> {
@@ -259,14 +380,23 @@ private struct ClipInspector: View {
 private struct InspectorSection<Content: View>: View {
     @Environment(\.theme) private var theme
     let title: String
+    /// Optional SF Symbol shown beside the section label.
+    var systemImage: String? = nil
     @ViewBuilder var content: Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacing.sm) {
-            Text(title.uppercased())
-                .font(theme.typography.sectionLabel)
-                .foregroundStyle(theme.colors.textTertiary)
-                .tracking(0.8)
+            HStack(spacing: 6) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 9, weight: .heavy))
+                        .foregroundStyle(theme.colors.textTertiary)
+                }
+                Text(title.uppercased())
+                    .font(theme.typography.sectionLabel)
+                    .foregroundStyle(theme.colors.textTertiary)
+                    .tracking(0.8)
+            }
             VStack(alignment: .leading, spacing: theme.spacing.md) {
                 content
             }

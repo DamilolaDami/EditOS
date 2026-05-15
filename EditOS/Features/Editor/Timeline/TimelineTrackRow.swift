@@ -262,6 +262,9 @@ struct TimelineClipView: View {
                 } else if clip.text != nil {
                     Image(systemName: "textformat")
                         .font(.system(size: 10, weight: .bold))
+                } else if clip.filterPreset != nil {
+                    Image(systemName: "wand.and.stars")
+                        .font(.system(size: 10, weight: .bold))
                 } else if clip.volume == 0 {
                     Image(systemName: "speaker.slash.fill")
                         .font(.system(size: 9, weight: .bold))

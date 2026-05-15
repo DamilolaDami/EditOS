@@ -478,18 +478,46 @@ struct ExportSheet: View {
         }
     }
 
-    /// Lazily creates ~/Movies/EditOS so every export lands in the same place
-    /// out of the box, à la CapCut.
+    /// Lazily creates the default destination. Tries `~/Movies/EditOS` first
+    /// — that's where users expect their renders to land — but the sandbox
+    /// container only exposes a read-only mirror of `~/Movies` without the
+    /// movies-folder entitlement, so we fall back to the always-writable
+    /// `~/Library/Application Support/EditOS/Exports` if that fails. The
+    /// user can still pick anywhere they want via "Change", which grants a
+    /// proper security-scoped write through `ENABLE_USER_SELECTED_FILES`.
     private func ensureDefaultFolder() -> URL? {
-        guard let movies = try? FileManager.default.url(
+        // 1) Real Movies folder — works once the user grants access (e.g. via
+        // the Change picker) or if the Movies folder entitlement is added.
+        if let movies = try? FileManager.default.url(
             for: .moviesDirectory,
             in: .userDomainMask,
             appropriateFor: nil,
+            create: false
+        ) {
+            let candidate = movies.appending(path: "EditOS", directoryHint: .isDirectory)
+            // Test-create the directory; if it succeeds and the parent is
+            // writable, use it.
+            if (try? FileManager.default.createDirectory(at: candidate, withIntermediateDirectories: true)) != nil,
+               FileManager.default.isWritableFile(atPath: candidate.path) {
+                return candidate
+            }
+        }
+
+        // 2) Application Support — sandbox-mapped into the container, always
+        // writable for the owning app. Reveal-in-Finder still opens the right
+        // folder for the user.
+        if let support = try? FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
             create: true
-        ) else { return nil }
-        let folder = movies.appending(path: "EditOS", directoryHint: .isDirectory)
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        return folder
+        ) {
+            let fallback = support.appending(path: "EditOS/Exports", directoryHint: .isDirectory)
+            try? FileManager.default.createDirectory(at: fallback, withIntermediateDirectories: true)
+            return fallback
+        }
+
+        return nil
     }
 
     private func startExport() {

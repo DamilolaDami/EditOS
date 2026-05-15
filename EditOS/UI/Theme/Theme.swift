@@ -117,6 +117,7 @@ extension Track.Kind {
         case .overlay: theme.colors.trackOverlay
         case .caption: theme.colors.trackCaption
         case .sticker: theme.colors.trackSticker
+        case .filter: Color(red: 0.30, green: 0.78, blue: 0.85)  // teal — distinct from other lanes
         }
     }
 
@@ -127,6 +128,7 @@ extension Track.Kind {
         case .overlay: "rectangle.on.rectangle"
         case .caption: "captions.bubble"
         case .sticker: "face.smiling"
+        case .filter: "wand.and.stars"
         }
     }
 
@@ -137,7 +139,7 @@ extension Track.Kind {
     var timelineHeight: CGFloat {
         switch self {
         case .video, .audio: 56
-        case .overlay, .caption, .sticker: 26
+        case .overlay, .caption, .sticker, .filter: 26
         }
     }
 }

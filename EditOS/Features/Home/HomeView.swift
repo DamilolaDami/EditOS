@@ -6,31 +6,67 @@ struct HomeView: View {
     @Environment(\.theme) private var theme
 
     @State private var selection: HomeSection = .home
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding: Bool = false
+    @State private var isOnboardingPresented: Bool = false
 
     var body: some View {
         NavigationSplitView {
             HomeSidebar(selection: $selection)
                 .frame(minWidth: 220)
         } detail: {
-            ScrollView {
-                VStack(alignment: .leading, spacing: theme.spacing.xl) {
-                    HomeHeader()
-                    CreateProjectBanner {
-                        let project = environment.projectStore.createProject(named: "Untitled")
-                        openWindow(id: WindowID.editor.rawValue, value: project.id)
-                    }
-                    QuickActionsRow()
-                    ProjectGrid(projects: environment.projectStore.projects) { project in
-                        openWindow(id: WindowID.editor.rawValue, value: project.id)
-                    }
-                }
-                .padding(.horizontal, theme.spacing.xxl)
-                .padding(.vertical, theme.spacing.xl)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-            }
-            .background(theme.colors.background)
+            detail
         }
         .toolbar(removing: .sidebarToggle)
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        switch selection {
+        case .home:         homeDetail
+        case .templates:    HomeTemplatesView()
+        case .media:        HomeMediaView()
+        case .designStudio: HomeDesignStudioView()
+        }
+    }
+
+    private var homeDetail: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: theme.spacing.xl) {
+                HomeHeader()
+                CreateProjectBanner {
+                    let project = environment.projectStore.createProject(named: "Untitled")
+                    openWindow(id: WindowID.editor.rawValue, value: project.id)
+                }
+                QuickActionsRow()
+                ProjectGrid(projects: environment.projectStore.projects) { project in
+                    openWindow(id: WindowID.editor.rawValue, value: project.id)
+                }
+            }
+            .padding(.horizontal, theme.spacing.xxl)
+            .padding(.vertical, theme.spacing.xl)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .background(theme.colors.background)
+        .onAppear {
+            if !hasCompletedOnboarding {
+                isOnboardingPresented = true
+            }
+        }
+        // Re-show when the flag flips back to false (e.g. Help → Replay Onboarding).
+        .onChange(of: hasCompletedOnboarding) { _, completed in
+            isOnboardingPresented = !completed
+        }
+        .sheet(isPresented: $isOnboardingPresented) {
+            OnboardingView { shouldCreate in
+                hasCompletedOnboarding = true
+                isOnboardingPresented = false
+                if shouldCreate {
+                    let project = environment.projectStore.createProject(named: "Untitled")
+                    openWindow(id: WindowID.editor.rawValue, value: project.id)
+                }
+            }
+            .interactiveDismissDisabled(true)
+        }
     }
 }
 

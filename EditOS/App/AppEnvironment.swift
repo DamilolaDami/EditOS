@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftData
 
 /// Top-level container for app services. Injected via `@Environment`.
 /// Construct once at app launch; pass it down rather than spinning up
@@ -16,7 +17,10 @@ final class AppEnvironment {
     let freesoundService: FreesoundService
     let exportEngine: ExportEngine
 
+    /// Container used to build the SwiftData-backed ProjectStore when one
+    /// isn't supplied. Wired from `EditOSApp` at startup.
     init(
+        modelContainer: ModelContainer,
         projectStore: ProjectStore? = nil,
         mediaImporter: MediaImporter = MediaImporter(),
         thumbnailGenerator: ThumbnailGenerator = ThumbnailGenerator(),
@@ -26,7 +30,7 @@ final class AppEnvironment {
         freesoundService: FreesoundService = FreesoundService(token: APIKeys.freesound),
         exportEngine: ExportEngine = ExportEngine()
     ) {
-        self.projectStore = projectStore ?? .live()
+        self.projectStore = projectStore ?? ProjectStore.live(container: modelContainer)
         self.mediaImporter = mediaImporter
         self.thumbnailGenerator = thumbnailGenerator
         self.waveformGenerator = waveformGenerator

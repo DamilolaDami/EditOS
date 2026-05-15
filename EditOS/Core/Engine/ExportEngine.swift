@@ -59,14 +59,15 @@ actor ExportEngine {
             ))
         }
 
-        guard let session = AVAssetExportSession(asset: result.composition, presetName: settings.preset) else {
+        guard let session = await AVAssetExportSession(asset: result.composition, presetName: settings.preset) else {
             Self.log.error("Couldn't construct AVAssetExportSession for preset \(settings.preset, privacy: .public)")
             throw ExportError.noExportSession
         }
         session.outputURL = settings.outputURL
         session.outputFileType = settings.fileType
         session.shouldOptimizeForNetworkUse = true
-        session.audioMix = result.audioMix
+        session.audioMix = await result.audioMix
+        session.videoComposition = await result.videoComposition
 
         // Poll progress while the session runs so callers can drive a UI bar.
         let progressTask = Task.detached { [weak session] in

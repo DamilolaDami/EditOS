@@ -100,6 +100,9 @@ struct TimelinePanel: View {
             Button {
                 model.addTrack(kind: .sticker)
             } label: { Label("Sticker Track", systemImage: "face.smiling") }
+            Button {
+                model.addTrack(kind: .filter)
+            } label: { Label("Filter Track", systemImage: "wand.and.stars") }
         } label: {
             HStack(spacing: theme.spacing.xs) {
                 Image(systemName: "plus")

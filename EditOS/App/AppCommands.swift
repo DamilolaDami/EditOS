@@ -15,6 +15,14 @@ struct AppCommands: Commands {
             .keyboardShortcut("n", modifiers: .command)
         }
 
+        CommandGroup(after: .newItem) {
+            Divider()
+            Button("Show Projects Window") {
+                openWindow(id: WindowID.home.rawValue)
+            }
+            .keyboardShortcut("0", modifiers: [.command, .shift])
+        }
+
         CommandGroup(replacing: .undoRedo) {
             Button("Undo") {
                 editorModel?.undo()
@@ -57,6 +65,79 @@ struct AppCommands: Commands {
             .disabled(editorModel?.selectedClipIDs.isEmpty ?? true)
         }
 
+        // Cursor-style selection commands live under Edit by the system.
+        CommandGroup(after: .pasteboard) {
+            Divider()
+            Button("Select All Clips") {
+                editorModel?.selectAllClips()
+            }
+            .keyboardShortcut("a", modifiers: .command)
+            .disabled(editorModel == nil)
+
+            Button("Deselect All") {
+                editorModel?.selectClip(nil)
+            }
+            .keyboardShortcut("a", modifiers: [.command, .shift])
+            .disabled(editorModel?.selectedClipIDs.isEmpty ?? true)
+        }
+
+        CommandMenu("View") {
+            Button("Zoom In Timeline") {
+                if let editorModel {
+                    editorModel.zoom = min(4.0, editorModel.zoom * 1.25)
+                }
+            }
+            .keyboardShortcut("=", modifiers: .command)
+            .disabled(editorModel == nil)
+
+            Button("Zoom Out Timeline") {
+                if let editorModel {
+                    editorModel.zoom = max(0.25, editorModel.zoom * 0.8)
+                }
+            }
+            .keyboardShortcut("-", modifiers: .command)
+            .disabled(editorModel == nil)
+
+            Button("Reset Timeline Zoom") {
+                editorModel?.zoom = 1.0
+            }
+            .keyboardShortcut("0", modifiers: .command)
+            .disabled(editorModel == nil)
+
+            Divider()
+
+            Button(editorModel?.snapEnabled == false ? "Enable Snap" : "Disable Snap") {
+                editorModel?.snapEnabled.toggle()
+            }
+            .keyboardShortcut("s", modifiers: [.command, .shift])
+            .disabled(editorModel == nil)
+
+            Divider()
+
+            Button("Toggle Library") {
+                NotificationCenter.default.post(name: .editorToggleLibrary, object: nil)
+            }
+            .keyboardShortcut("l", modifiers: [.command, .option])
+            .disabled(editorModel == nil)
+
+            Button("Toggle Inspector") {
+                NotificationCenter.default.post(name: .editorToggleInspector, object: nil)
+            }
+            .keyboardShortcut("i", modifiers: [.command, .option])
+            .disabled(editorModel == nil)
+        }
+
+        CommandMenu("Library") {
+            tabButton("Media", "1", to: .media)
+            tabButton("Audio", "2", to: .audio)
+            tabButton("Text", "3", to: .text)
+            tabButton("Stickers", "4", to: .stickers)
+            tabButton("Filters", "5", to: .filters)
+            tabButton("Captions", "6", to: .captions)
+            tabButton("Effects", "7", to: .effects)
+            tabButton("Transitions", "8", to: .transitions)
+        }
+
         CommandMenu("Playback") {
             Button(editorModel?.playback.isPlaying == true ? "Pause" : "Play") {
                 editorModel?.playback.togglePlayback()
@@ -89,6 +170,20 @@ struct AppCommands: Commands {
             }
             .keyboardShortcut(.rightArrow, modifiers: .shift)
             .disabled(editorModel == nil)
+
+            Divider()
+
+            Button("Go to Start") {
+                editorModel?.playback.seek(to: 0)
+            }
+            .keyboardShortcut(.upArrow, modifiers: .command)
+            .disabled(editorModel == nil)
+
+            Button("Go to End") {
+                editorModel?.playback.seek(to: editorModel?.playback.duration ?? 0)
+            }
+            .keyboardShortcut(.downArrow, modifiers: .command)
+            .disabled(editorModel == nil)
         }
 
         CommandMenu("Clip") {
@@ -108,26 +203,54 @@ struct AppCommands: Commands {
             .keyboardShortcut("m", modifiers: .command)
             .disabled(editorModel?.selectedClipID == nil)
 
+            Divider()
+
             Button("Delete Clip") {
                 if let editorModel {
                     Task { await editorModel.deleteSelectedClip() }
                 }
             }
             .keyboardShortcut(.delete, modifiers: [])
+            .disabled(editorModel?.selectedClipIDs.isEmpty ?? true)
+
+            Button("Ripple Delete") {
+                if let editorModel {
+                    Task { await editorModel.rippleDeleteSelectedClip() }
+                }
+            }
+            .keyboardShortcut(.delete, modifiers: .shift)
             .disabled(editorModel?.selectedClipID == nil)
         }
 
-        CommandGroup(after: .toolbar) {
-            Button("Toggle Inspector") {
-                NotificationCenter.default.post(name: .editorToggleInspector, object: nil)
+        CommandGroup(replacing: .help) {
+            Button("Replay Onboarding") {
+                UserDefaults.standard.set(false, forKey: "hasCompletedOnboarding")
+                openWindow(id: WindowID.home.rawValue)
             }
-            .keyboardShortcut("i", modifiers: [.command, .option])
 
-            Button("Toggle Library") {
-                NotificationCenter.default.post(name: .editorToggleLibrary, object: nil)
+            Button("Report an Issue") {
+                if let url = URL(string: "https://github.com/DamilolaDami/EditOS/issues/new") {
+                    NSWorkspace.shared.open(url)
+                }
             }
-            .keyboardShortcut("l", modifiers: [.command, .option])
+
+            Divider()
+
+            Button("EditOS on GitHub") {
+                if let url = URL(string: "https://github.com/DamilolaDami/EditOS") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
         }
+    }
+
+    @ViewBuilder
+    private func tabButton(_ title: String, _ shortcut: String, to tool: ToolCategory) -> some View {
+        Button(title) {
+            editorModel?.selectedTool = tool
+        }
+        .keyboardShortcut(KeyEquivalent(Character(shortcut)), modifiers: .command)
+        .disabled(editorModel == nil)
     }
 }
 

@@ -59,6 +59,8 @@ struct LibraryPanel: View {
             StickerLibrary(model: model)
         case .captions:
             TextLibrary(model: model)
+        case .filters:
+            FilterLibrary(model: model)
         default:
             placeholder(for: model.selectedTool)
         }

@@ -1,10 +1,15 @@
 import AVFoundation
+import CoreImage
 import Foundation
 import OSLog
 
 /// Result of compositing a project into AVFoundation primitives.
 struct CompositionResult: Sendable {
     let composition: AVComposition
+    /// Per-frame filter pipeline (CIFilter chains keyed off the video clip
+    /// active at each timestamp). `nil` when no clip carries a filter — lets
+    /// the player render the shared video track directly.
+    let videoComposition: AVVideoComposition?
     let audioMix: AVAudioMix?
 }
 
@@ -78,11 +83,90 @@ struct CompositionBuilder: Sendable {
             m.inputParameters = audioParams
             mix = m.copy() as? AVAudioMix
         }
-        Self.log.info("Built composition: duration \(composition.duration.seconds, privacy: .public)s, \(composition.tracks.count, privacy: .public) tracks, \(audioParams.count, privacy: .public) audio params")
+        let avComposition = composition.copy() as! AVComposition
+        let videoComposition = await Self.buildFilterComposition(for: project, asset: avComposition)
+        Self.log.info("Built composition: duration \(composition.duration.seconds, privacy: .public)s, \(composition.tracks.count, privacy: .public) tracks, \(audioParams.count, privacy: .public) audio params, videoComp \(videoComposition != nil, privacy: .public)")
         return CompositionResult(
-            composition: composition.copy() as! AVComposition,
+            composition: avComposition,
+            videoComposition: videoComposition,
             audioMix: mix
         )
+    }
+
+    /// Builds an `AVVideoComposition` that runs CIFilter chains based on
+    /// filter clips placed on dedicated `.filter` tracks. Each filter clip
+    /// carries a `filterPreset` id and an intensity; the per-frame closure
+    /// looks up the active filter clip(s) at `request.compositionTime`.
+    /// Returns nil when no filter clip exists so the player skips CI entirely.
+    private static func buildFilterComposition(
+        for project: Project,
+        asset: AVAsset
+    ) async -> AVVideoComposition? {
+        // Snapshot the filter ranges up-front so the hot path stays cheap.
+        struct FilteredRange: Sendable {
+            let start: TimeInterval
+            let end: TimeInterval
+            let presetID: String
+            let intensity: Double
+        }
+        var ranges: [FilteredRange] = []
+
+        // 1) Filter tracks — the primary path now. Filter clips on dedicated
+        // lanes affect whatever video is beneath them during their
+        // timeRange — same model as overlay clips.
+        for track in project.timeline.tracks where track.kind == .filter && !track.isHidden {
+            for clip in track.clips {
+                guard let preset = clip.filterPreset, preset != "none" else { continue }
+                ranges.append(
+                    FilteredRange(
+                        start: clip.timeRange.start,
+                        end: clip.timeRange.end,
+                        presetID: preset,
+                        intensity: clip.filterIntensity ?? 1.0
+                    )
+                )
+            }
+        }
+
+        // 2) Legacy per-clip filters set via `Clip.filterPreset` on video
+        // tracks still render (backward compat for projects saved with the
+        // earlier filter model).
+        for track in project.timeline.tracks where track.kind == .video && !track.isHidden {
+            for clip in track.clips {
+                guard let preset = clip.filterPreset, preset != "none" else { continue }
+                ranges.append(
+                    FilteredRange(
+                        start: clip.timeRange.start,
+                        end: clip.timeRange.end,
+                        presetID: preset,
+                        intensity: clip.filterIntensity ?? 1.0
+                    )
+                )
+            }
+        }
+        guard !ranges.isEmpty else { return nil }
+
+        do {
+            return try await AVVideoComposition.videoComposition(with: asset) { request in
+                let source = request.sourceImage
+                let t = request.compositionTime.seconds
+                // First range covering this time wins. Video clips don't
+                // overlap on a single timeline track, so at most one matches.
+                if let range = ranges.first(where: { t >= $0.start && t < $0.end }) {
+                    let filtered = FilterCatalog.apply(
+                        presetID: range.presetID,
+                        intensity: range.intensity,
+                        to: source
+                    )
+                    request.finish(with: filtered.cropped(to: source.extent), context: nil)
+                } else {
+                    request.finish(with: source, context: nil)
+                }
+            }
+        } catch {
+            Self.log.error("Failed to build filter video composition: \(String(describing: error), privacy: .public)")
+            return nil
+        }
     }
 
     private func insertClip(

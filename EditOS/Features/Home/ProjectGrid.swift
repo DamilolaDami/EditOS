@@ -43,6 +43,7 @@ struct ProjectCard: View {
     @State private var thumbnail: CGImage?
     @State private var isRenaming = false
     @State private var draftName: String = ""
+    @State private var isConfirmingDelete = false
     @FocusState private var nameFocused: Bool
 
     var body: some View {
@@ -120,16 +121,6 @@ struct ProjectCard: View {
                         .font(theme.typography.caption)
                         .foregroundStyle(theme.colors.textSecondary)
                 }
-                .contextMenu {
-                    Button("Rename") { beginRename() }
-                    Button("Show in Finder") {
-                        // Future: surface the project's .editos file.
-                    }
-                    Divider()
-                    Button(role: .destructive) {
-                        environment.projectStore.delete(project)
-                    } label: { Text("Delete Project") }
-                }
             }
             .padding(theme.spacing.sm)
             .background(
@@ -140,6 +131,25 @@ struct ProjectCard: View {
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())
+        .contextMenu {
+            Button {
+                beginRename()
+            } label: { Label("Rename", systemImage: "pencil") }
+
+            Button {
+                onOpen()
+            } label: { Label("Open", systemImage: "rectangle.stack") }
+
+            Button {
+                duplicateProject()
+            } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
+
+            Divider()
+
+            Button(role: .destructive) {
+                isConfirmingDelete = true
+            } label: { Label("Delete Project…", systemImage: "trash") }
+        }
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovering = hovering
@@ -148,6 +158,30 @@ struct ProjectCard: View {
         .task(id: thumbnailKey) {
             await loadThumbnail()
         }
+        .alert("Delete project?", isPresented: $isConfirmingDelete) {
+            Button("Cancel", role: .cancel) { }
+            Button("Delete", role: .destructive) {
+                environment.projectStore.delete(project)
+            }
+        } message: {
+            Text("\"\(project.name)\" will be removed permanently. This can't be undone, and any media files on disk stay where they are.")
+        }
+    }
+
+    /// Duplicate the project as a brand new entry — same canvas + tracks +
+    /// asset references, but a fresh id so the original stays intact.
+    private func duplicateProject() {
+        var copy = project
+        copy = Project(
+            id: UUID(),
+            name: "\(project.name) Copy",
+            canvas: project.canvas,
+            assets: project.assets,
+            timeline: project.timeline,
+            coverBookmark: project.coverBookmark
+        )
+        environment.projectStore.update(copy)
+        _ = copy  // silence unused warning when refactored
     }
 
     /// Distinguishes "cover changed" from "first video changed" so .task fires

@@ -28,6 +28,12 @@ struct Clip: Identifiable, Hashable, Sendable, Codable {
     var foregroundColor: ColorRGBA?
     /// Font / sticker size in canvas points.
     var overlaySize: CGFloat?
+    /// Identifier of a `FilterCatalog` preset applied to this clip. `nil`
+    /// means no filter (raw source).
+    var filterPreset: String?
+    /// Filter strength in 0…1. Filters blend with the original at lower
+    /// values so the user can dial in subtlety.
+    var filterIntensity: Double?
 
     init(
         id: UUID = UUID(),
@@ -42,7 +48,9 @@ struct Clip: Identifiable, Hashable, Sendable, Codable {
         stickerSymbol: String? = nil,
         stickerImagePath: String? = nil,
         foregroundColor: ColorRGBA? = nil,
-        overlaySize: CGFloat? = nil
+        overlaySize: CGFloat? = nil,
+        filterPreset: String? = nil,
+        filterIntensity: Double? = nil
     ) {
         self.id = id
         self.assetID = assetID
@@ -57,6 +65,27 @@ struct Clip: Identifiable, Hashable, Sendable, Codable {
         self.stickerImagePath = stickerImagePath
         self.foregroundColor = foregroundColor
         self.overlaySize = overlaySize
+        self.filterPreset = filterPreset
+        self.filterIntensity = filterIntensity
+    }
+}
+
+extension Clip {
+    /// What kind of clip this is — drives Inspector layout, timeline cell
+    /// rendering, and composition behaviour. Determined from the payload
+    /// fields rather than stored separately so older projects keep working.
+    enum Kind: Sendable {
+        case media
+        case text
+        case sticker
+        case filter
+    }
+
+    var kind: Kind {
+        if text != nil { return .text }
+        if stickerSymbol != nil || stickerImagePath != nil { return .sticker }
+        if filterPreset != nil { return .filter }
+        return .media
     }
 }
 

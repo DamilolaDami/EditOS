@@ -14,6 +14,7 @@ struct Track: Identifiable, Hashable, Sendable, Codable {
         case overlay
         case caption
         case sticker
+        case filter
 
         var displayName: String {
             switch self {
@@ -22,6 +23,7 @@ struct Track: Identifiable, Hashable, Sendable, Codable {
             case .overlay: "Overlay"
             case .caption: "Captions"
             case .sticker: "Stickers"
+            case .filter: "Filters"
             }
         }
     }
