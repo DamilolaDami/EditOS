@@ -254,8 +254,7 @@ struct CompositionBuilder: Sendable {
                             start: clip.timeRange.start,
                             end: clip.timeRange.end,
                             frames: rendered.frames,
-                            loops: rendered.loops,
-                            durations: rendered.durations
+                            durations: rendered.durations, loops: rendered.loops
                         ))
                     }
                 }

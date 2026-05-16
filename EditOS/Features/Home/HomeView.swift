@@ -38,18 +38,37 @@ struct HomeView: View {
     private var homeDetail: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: theme.spacing.xl) {
-                HomeHeader(syncMonitor: environment.cloudKitSyncMonitor)
-                CreateProjectBanner {
-                    let project = environment.projectStore.createProject(named: "Untitled")
-                    environment.recentProjects.recordOpen(project.id)
-                    openWindow(id: WindowID.editor.rawValue, value: project.id)
-                }
+                HomeHeader(
+                    syncMonitor: environment.cloudKitSyncMonitor,
+                    projects: environment.projectStore.projects
+                )
+
+                // Top-row: Continue Editing + Create side by side when
+                // there's a recent project. When there isn't, the Create
+                // banner takes the full width — newcomers get the "make
+                // a project" call to action front and centre.
                 if let mostRecent = continueEditingProject {
-                    ContinueEditingCard(project: mostRecent) {
-                        environment.recentProjects.recordOpen(mostRecent.id)
-                        openWindow(id: WindowID.editor.rawValue, value: mostRecent.id)
+                    HStack(spacing: theme.spacing.md) {
+                        ContinueEditingCard(project: mostRecent) {
+                            environment.recentProjects.recordOpen(mostRecent.id)
+                            openWindow(id: WindowID.editor.rawValue, value: mostRecent.id)
+                        }
+                        .frame(maxWidth: .infinity)
+                        CreateProjectBanner(compact: true) {
+                            let project = environment.projectStore.createProject(named: "Untitled")
+                            environment.recentProjects.recordOpen(project.id)
+                            openWindow(id: WindowID.editor.rawValue, value: project.id)
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                } else {
+                    CreateProjectBanner(compact: false) {
+                        let project = environment.projectStore.createProject(named: "Untitled")
+                        environment.recentProjects.recordOpen(project.id)
+                        openWindow(id: WindowID.editor.rawValue, value: project.id)
                     }
                 }
+
                 QuickActionsRow()
                 ProjectGrid(
                     projects: filteredProjects,
@@ -67,7 +86,22 @@ struct HomeView: View {
             .padding(.vertical, theme.spacing.xl)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .background(theme.colors.background)
+        .background(
+            // Ambient backdrop — subtle radial accent + base background.
+            // Keeps the page from feeling flat without competing for
+            // attention with the foreground cards.
+            ZStack {
+                theme.colors.background
+                RadialGradient(
+                    colors: [theme.colors.accent.opacity(0.13), .clear],
+                    center: UnitPoint(x: 0.1, y: -0.05),
+                    startRadius: 80,
+                    endRadius: 720
+                )
+                .blendMode(.plusLighter)
+                .allowsHitTesting(false)
+            }
+        )
         .onAppear {
             if !hasCompletedOnboarding {
                 isOnboardingPresented = true
@@ -170,19 +204,101 @@ enum HomeSection: String, Hashable, CaseIterable {
 private struct HomeHeader: View {
     @Environment(\.theme) private var theme
     let syncMonitor: CloudKitSyncMonitor
+    let projects: [Project]
+
+    private var totalDurationLabel: String {
+        let total = projects.reduce(0) { $0 + $1.timeline.duration }
+        guard total > 0 else { return "0s" }
+        let minutes = Int(total) / 60
+        let seconds = Int(total) % 60
+        if minutes >= 60 {
+            let hours = minutes / 60
+            let rem = minutes % 60
+            return "\(hours)h \(rem)m"
+        }
+        if minutes > 0 {
+            return "\(minutes)m \(seconds)s"
+        }
+        return "\(seconds)s"
+    }
+
+    private var appVersionLabel: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        return "v\(version)"
+    }
 
     var body: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: theme.spacing.xs) {
-                Text("EditOS")
-                    .font(.system(size: 28, weight: .bold))
-                    .foregroundStyle(theme.colors.textPrimary)
-                Text("Open-source video editor for macOS")
-                    .font(theme.typography.body)
-                    .foregroundStyle(theme.colors.textSecondary)
+        VStack(alignment: .leading, spacing: theme.spacing.md) {
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 8) {
+                        Text("EditOS")
+                            .font(.system(size: 36, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.colors.textPrimary)
+                        Text(appVersionLabel)
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(theme.colors.textTertiary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule().fill(theme.colors.surface)
+                            )
+                            .overlay(
+                                Capsule().stroke(theme.colors.border, lineWidth: 1)
+                            )
+                            .offset(y: 2)
+                    }
+                    Text("Open-source video editor for macOS")
+                        .font(theme.typography.body)
+                        .foregroundStyle(theme.colors.textSecondary)
+                }
+                Spacer()
+                CloudKitSyncBadge(monitor: syncMonitor)
             }
-            Spacer()
-            CloudKitSyncBadge(monitor: syncMonitor)
+
+            // Stats row — at-a-glance project count + total runtime.
+            // Sits below the title without competing with the cards
+            // that come after.
+            HStack(spacing: theme.spacing.lg) {
+                StatPill(
+                    systemImage: "rectangle.stack.fill",
+                    label: "\(projects.count)",
+                    sublabel: projects.count == 1 ? "Project" : "Projects"
+                )
+                StatPill(
+                    systemImage: "clock.fill",
+                    label: totalDurationLabel,
+                    sublabel: "Total runtime"
+                )
+                Spacer()
+            }
+        }
+        .padding(.vertical, theme.spacing.sm)
+    }
+}
+
+private struct StatPill: View {
+    @Environment(\.theme) private var theme
+    let systemImage: String
+    let label: String
+    let sublabel: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(theme.colors.accent)
+                .frame(width: 24, height: 24)
+                .background(theme.colors.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
+            VStack(alignment: .leading, spacing: -1) {
+                Text(label)
+                    .font(.system(size: 14, weight: .semibold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(theme.colors.textPrimary)
+                Text(sublabel)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(theme.colors.textTertiary)
+                    .tracking(0.4)
+            }
         }
     }
 }
@@ -549,56 +665,77 @@ private struct BulletRow: View {
 }
 
 /// "Continue editing" hero — surfaces the most-recently-opened project
-/// one tap away, right under the Create banner on the Home view.
+/// one tap away, right under the title on the Home view. Sits side-by-
+/// side with the Create banner when there's a project to continue.
+/// The card shows a real poster-frame thumbnail or cover image if one
+/// is available; otherwise a tinted gradient placeholder.
 private struct ContinueEditingCard: View {
     @Environment(\.theme) private var theme
+    @Environment(AppEnvironment.self) private var environment
     let project: Project
     let onOpen: () -> Void
 
     @State private var isHovering = false
+    @State private var thumbnail: CGImage?
+
+    private var thumbnailKey: String {
+        let cover = project.coverBookmark?.hashValue ?? 0
+        let firstVideoID = project.assets.first(where: { $0.kind == .video })?.id.uuidString ?? ""
+        return "\(project.id)|\(cover)|\(firstVideoID)"
+    }
 
     var body: some View {
         Button(action: onOpen) {
             HStack(spacing: theme.spacing.md) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: theme.radius.sm)
-                        .fill(theme.colors.accent.opacity(0.18))
-                        .frame(width: 48, height: 48)
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(theme.colors.accent)
-                }
-                VStack(alignment: .leading, spacing: 2) {
+                thumbnailView
+                    .frame(width: 96, height: 54)
+                    .clipShape(RoundedRectangle(cornerRadius: theme.radius.sm))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: theme.radius.sm)
+                            .stroke(theme.colors.border.opacity(0.6), lineWidth: 1)
+                    )
+
+                VStack(alignment: .leading, spacing: 3) {
                     Text("CONTINUE EDITING")
                         .font(.system(size: 9, weight: .semibold))
                         .tracking(1.0)
-                        .foregroundStyle(theme.colors.textTertiary)
+                        .foregroundStyle(theme.colors.accent)
                     Text(project.name)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(theme.colors.textPrimary)
                         .lineLimit(1)
-                    Text(project.modifiedAt, format: .relative(presentation: .named))
-                        .font(theme.typography.caption)
-                        .foregroundStyle(theme.colors.textSecondary)
+                    HStack(spacing: 4) {
+                        Image(systemName: "clock")
+                            .font(.system(size: 9))
+                        Text(project.modifiedAt, format: .relative(presentation: .named))
+                    }
+                    .font(theme.typography.caption)
+                    .foregroundStyle(theme.colors.textSecondary)
                 }
                 Spacer()
                 Image(systemName: "arrow.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(theme.colors.textSecondary)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(theme.colors.accent)
                     .offset(x: isHovering ? 4 : 0)
                     .animation(.easeInOut(duration: 0.18), value: isHovering)
             }
             .padding(theme.spacing.md)
+            .frame(maxWidth: .infinity, minHeight: 90)
             .background(
-                RoundedRectangle(cornerRadius: theme.radius.md)
+                RoundedRectangle(cornerRadius: theme.radius.lg)
                     .fill(isHovering ? theme.colors.surfaceElevated : theme.colors.surface)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: theme.radius.md)
+                RoundedRectangle(cornerRadius: theme.radius.lg)
                     .stroke(
-                        isHovering ? theme.colors.accent.opacity(0.5) : theme.colors.border,
+                        isHovering ? theme.colors.accent.opacity(0.6) : theme.colors.border,
                         lineWidth: 1
                     )
+            )
+            .shadow(
+                color: isHovering ? theme.colors.accent.opacity(0.18) : .black.opacity(0.18),
+                radius: isHovering ? 14 : 8,
+                y: 4
             )
         }
         .buttonStyle(.plain)
@@ -607,66 +744,160 @@ private struct ContinueEditingCard: View {
                 isHovering = hovering
             }
         }
+        .task(id: thumbnailKey) {
+            await loadThumbnail()
+        }
+    }
+
+    @ViewBuilder
+    private var thumbnailView: some View {
+        if let thumbnail {
+            Image(decorative: thumbnail, scale: 1)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+        } else {
+            // Gradient placeholder tinted by the accent — keeps the
+            // card from looking gappy while the poster frame loads or
+            // when the project has no media yet.
+            LinearGradient(
+                colors: [
+                    theme.colors.accent.opacity(0.35),
+                    theme.colors.accent.opacity(0.10)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .overlay(
+                Image(systemName: "play.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
+            )
+        }
+    }
+
+    private func loadThumbnail() async {
+        if let image = await loadCoverImage() {
+            await MainActor.run { thumbnail = image }
+            return
+        }
+        if let image = await loadFirstVideoPoster() {
+            await MainActor.run { thumbnail = image }
+            return
+        }
+        await MainActor.run { thumbnail = nil }
+    }
+
+    private func loadCoverImage() async -> CGImage? {
+        guard let bookmark = project.coverBookmark else { return nil }
+        var isStale = false
+        guard let url = try? URL(
+            resolvingBookmarkData: bookmark,
+            options: [.withSecurityScope],
+            relativeTo: nil,
+            bookmarkDataIsStale: &isStale
+        ) else { return nil }
+        let didStart = url.startAccessingSecurityScopedResource()
+        defer { if didStart { url.stopAccessingSecurityScopedResource() } }
+        guard let nsImage = NSImage(contentsOf: url) else { return nil }
+        var rect = CGRect(origin: .zero, size: nsImage.size)
+        return nsImage.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+    }
+
+    private func loadFirstVideoPoster() async -> CGImage? {
+        guard let video = project.assets.first(where: { $0.kind == .video }) else { return nil }
+        guard let url = try? await environment.assetResolver.resolve(video) else { return nil }
+        return await environment.thumbnailGenerator.poster(
+            for: url,
+            at: 0,
+            size: CGSize(width: 320, height: 180)
+        )
     }
 }
 
 private struct CreateProjectBanner: View {
     @Environment(\.theme) private var theme
+    /// Smaller variant used when the banner sits next to the Continue
+    /// Editing card on the top row. The full-size variant takes the
+    /// whole width when there are no recent projects.
+    var compact: Bool = false
     let action: () -> Void
 
     @State private var isHovering = false
 
+    private let topColor = Color(red: 0.18, green: 0.55, blue: 0.95)
+    private let bottomColor = Color(red: 0.45, green: 0.32, blue: 0.95)
+
     var body: some View {
         Button(action: action) {
-            HStack(spacing: theme.spacing.lg) {
+            HStack(spacing: compact ? theme.spacing.md : theme.spacing.lg) {
                 ZStack {
                     Circle()
-                        .fill(.white.opacity(0.16))
-                        .frame(width: 64, height: 64)
+                        .fill(.white.opacity(0.18))
+                        .frame(
+                            width: compact ? 44 : 64,
+                            height: compact ? 44 : 64
+                        )
                     Image(systemName: "plus")
-                        .font(.system(size: 26, weight: .semibold))
+                        .font(.system(size: compact ? 18 : 26, weight: .semibold))
                         .foregroundStyle(.white)
                 }
-                VStack(alignment: .leading, spacing: theme.spacing.xs) {
-                    Text("Create a new project")
-                        .font(.system(size: 20, weight: .semibold))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("New project")
+                        .font(.system(size: compact ? 14 : 20, weight: .semibold))
                         .foregroundStyle(.white)
-                    Text("Start from scratch with a fresh timeline")
-                        .font(theme.typography.body)
+                    Text(compact ? "Fresh timeline" : "Start from scratch with a fresh timeline")
+                        .font(compact
+                              ? .system(size: 11)
+                              : theme.typography.body)
                         .foregroundStyle(.white.opacity(0.78))
+                        .lineLimit(1)
                 }
-                Spacer()
+                Spacer(minLength: 0)
                 Image(systemName: "arrow.right")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: compact ? 12 : 14, weight: .semibold))
                     .foregroundStyle(.white)
-                    .padding(.trailing, theme.spacing.lg)
+                    .padding(.trailing, compact ? theme.spacing.sm : theme.spacing.lg)
                     .offset(x: isHovering ? 4 : 0)
                     .animation(.easeInOut(duration: 0.18), value: isHovering)
             }
-            .padding(theme.spacing.xl)
-            .frame(maxWidth: .infinity, minHeight: 156)
+            .padding(compact ? theme.spacing.md : theme.spacing.xl)
+            .frame(maxWidth: .infinity, minHeight: compact ? 90 : 140)
             .background {
                 LinearGradient(
-                    colors: [
-                        Color(red: 0.18, green: 0.55, blue: 0.95),
-                        Color(red: 0.35, green: 0.72, blue: 1.0)
-                    ],
+                    colors: [topColor, bottomColor],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
             }
             .overlay(alignment: .bottomTrailing) {
+                // Decorative glyph that anchors the brand colour
+                // visually without competing with the foreground copy.
                 Image(systemName: "film.stack")
-                    .font(.system(size: 140, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.08))
-                    .offset(x: 30, y: 30)
+                    .font(.system(size: compact ? 80 : 140, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.10))
+                    .offset(x: 22, y: compact ? 18 : 30)
+            }
+            // Subtle inner glow to read more "lit" than flat fill.
+            .overlay {
+                LinearGradient(
+                    colors: [.white.opacity(0.18), .clear],
+                    startPoint: .top,
+                    endPoint: .center
+                )
+                .blendMode(.plusLighter)
+                .allowsHitTesting(false)
             }
             .clipShape(RoundedRectangle(cornerRadius: theme.radius.lg))
             .overlay {
                 RoundedRectangle(cornerRadius: theme.radius.lg)
-                    .stroke(.white.opacity(0.10), lineWidth: 1)
+                    .stroke(.white.opacity(0.14), lineWidth: 1)
             }
-            .shadow(color: Color(red: 0.18, green: 0.55, blue: 0.95).opacity(isHovering ? 0.35 : 0.18), radius: 18, y: 6)
+            .shadow(
+                color: topColor.opacity(isHovering ? 0.42 : 0.22),
+                radius: isHovering ? 22 : 14,
+                y: 8
+            )
         }
         .buttonStyle(.plain)
         .onHover { hovering in
@@ -680,10 +911,16 @@ private struct CreateProjectBanner: View {
 private struct QuickActionsRow: View {
     @Environment(\.theme) private var theme
 
-    private let actions: [(String, String, String)] = [
-        ("Import media", "tray.and.arrow.down", "Bring in video, audio, and images"),
-        ("Record screen", "record.circle", "Capture your screen as a clip"),
-        ("Open template", "rectangle.stack", "Start from a preset")
+    /// Tinted-icon quick actions. Each entry pairs the title and SF
+    /// Symbol with a per-card tint so the row reads as a colour-coded
+    /// menu rather than three identical cards.
+    private let actions: [(String, String, String, Color)] = [
+        ("Import media", "tray.and.arrow.down", "Video, audio, and images",
+         Color(red: 0.36, green: 0.72, blue: 1.0)),
+        ("Record screen", "record.circle", "Capture your screen",
+         Color(red: 0.96, green: 0.42, blue: 0.42)),
+        ("Open template", "rectangle.stack", "Start from a preset",
+         Color(red: 0.62, green: 0.55, blue: 0.96))
     ]
 
     var body: some View {
@@ -694,7 +931,12 @@ private struct QuickActionsRow: View {
                 .tracking(0.8)
             HStack(spacing: theme.spacing.md) {
                 ForEach(actions, id: \.0) { item in
-                    QuickActionCard(title: item.0, systemImage: item.1, subtitle: item.2)
+                    QuickActionCard(
+                        title: item.0,
+                        systemImage: item.1,
+                        subtitle: item.2,
+                        tint: item.3
+                    )
                 }
             }
         }
@@ -706,6 +948,7 @@ private struct QuickActionCard: View {
     let title: String
     let systemImage: String
     let subtitle: String
+    let tint: Color
 
     @State private var isHovering = false
 
@@ -714,11 +957,21 @@ private struct QuickActionCard: View {
             // Stubbed — wired up later.
         } label: {
             HStack(spacing: theme.spacing.md) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 18, weight: .regular))
-                    .foregroundStyle(theme.colors.accent)
-                    .frame(width: 36, height: 36)
-                    .background(theme.colors.accentMuted, in: RoundedRectangle(cornerRadius: theme.radius.sm))
+                ZStack {
+                    RoundedRectangle(cornerRadius: theme.radius.sm)
+                        .fill(
+                            LinearGradient(
+                                colors: [tint.opacity(0.35), tint.opacity(0.15)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    Image(systemName: systemImage)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(tint)
+                }
+                .frame(width: 40, height: 40)
+
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title)
                         .font(theme.typography.bodyEmphasized)
@@ -731,14 +984,22 @@ private struct QuickActionCard: View {
                 Spacer(minLength: 0)
             }
             .padding(theme.spacing.md)
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, minHeight: 64)
             .background(
                 RoundedRectangle(cornerRadius: theme.radius.md)
                     .fill(isHovering ? theme.colors.surfaceElevated : theme.colors.surface)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: theme.radius.md)
-                    .stroke(isHovering ? theme.colors.borderEmphasis : theme.colors.border, lineWidth: 1)
+                    .stroke(
+                        isHovering ? tint.opacity(0.55) : theme.colors.border,
+                        lineWidth: 1
+                    )
+            )
+            .shadow(
+                color: isHovering ? tint.opacity(0.18) : .clear,
+                radius: isHovering ? 8 : 0,
+                y: 3
             )
         }
         .buttonStyle(.plain)
