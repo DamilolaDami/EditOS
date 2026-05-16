@@ -10,7 +10,7 @@ struct TimelinePanel: View {
     /// Pixels per second at zoom = 1.
     private let basePixelsPerSecond: CGFloat = 60
     private let headerWidth: CGFloat = 168
-    private let markerStripHeight: CGFloat = 22
+    private let markerStripHeight: CGFloat = 28
     private let rulerHeight: CGFloat = 36
     private let coverLaneHeight: CGFloat = 34
     private let bottomScrubZoneHeight: CGFloat = 24
@@ -145,6 +145,18 @@ struct TimelinePanel: View {
                             pixelsPerSecond: pixelsPerSecond,
                             onScrub: { time in scrub(to: time) }
                         )
+                        .contextMenu {
+                            Button {
+                                model.addMarkerAtPlayhead()
+                            } label: { Label("Add Marker at Playhead", systemImage: "flag.fill") }
+
+                            if !model.project.timeline.markers.isEmpty {
+                                Divider()
+                                Button(role: .destructive) {
+                                    model.clearAllMarkers()
+                                } label: { Label("Clear All Markers", systemImage: "trash") }
+                            }
+                        }
                         CoverLane(model: model)
                         ForEach(model.project.timeline.tracks) { track in
                             TimelineTrackRow(

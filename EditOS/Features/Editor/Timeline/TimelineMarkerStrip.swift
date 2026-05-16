@@ -1,10 +1,16 @@
 import SwiftUI
 
-/// Marker pin strip rendered above (and overlapping with) the time ruler.
-/// Each marker draws a small flag pinned to its `time` — click to seek,
-/// drag to retime, double-click to rename inline, right-click for
-/// rename / delete / color. The whole strip also catches right-clicks on
-/// empty space to drop a new marker at that point.
+/// Marker pin strip rendered just above the time ruler.
+///
+/// Two layout constraints have to coexist: pins must be precisely
+/// positioned along the timeline, and their hit-targets must align with
+/// their visible bounds (so the ruler's `DragGesture(minimumDistance: 0)`
+/// underneath doesn't steal taps).
+///
+/// We satisfy both by laying out each pin in its own full-width HStack
+/// with a leading `Spacer().frame(width: timeOffset)` pushing it into
+/// place. Using real layout (rather than `.position` or `.offset`) keeps
+/// the hit region exactly under the visible pin in every SwiftUI version.
 struct TimelineMarkerStrip: View {
     @Environment(\.theme) private var theme
     @Bindable var model: EditorViewModel
@@ -13,62 +19,66 @@ struct TimelineMarkerStrip: View {
 
     @State private var renamingID: Marker.ID?
     @State private var draftName: String = ""
+    @State private var dragTimes: [Marker.ID: TimeInterval] = [:]
     @FocusState private var renameFocused: Bool
 
-    private let height: CGFloat = 22
+    static let height: CGFloat = 28
+
+    private var stripWidth: CGFloat { max(1, CGFloat(duration) * pixelsPerSecond) }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            // Empty area for right-click → "Add marker here". Sits behind
-            // the markers so pin gestures take priority.
-            Color.clear
-                .frame(width: max(1, CGFloat(duration) * pixelsPerSecond), height: height)
-                .contentShape(Rectangle())
-                .contextMenu {
-                    Button {
-                        model.addMarkerAtPlayhead()
-                    } label: { Label("Add Marker at Playhead", systemImage: "flag.fill") }
-
-                    if !model.project.timeline.markers.isEmpty {
-                        Divider()
-                        Button(role: .destructive) {
-                            model.clearAllMarkers()
-                        } label: { Label("Clear All Markers", systemImage: "trash") }
-                    }
-                }
+            // Visual placeholder so the ZStack sizes correctly. Explicit
+            // .allowsHitTesting(false) means clicks on empty strip space
+            // pass straight through — they don't get eaten before the
+            // marker pin's gestures see them.
+            Rectangle()
+                .fill(Color.clear)
+                .frame(width: stripWidth, height: Self.height)
+                .allowsHitTesting(false)
 
             ForEach(model.project.timeline.markers) { marker in
-                MarkerPin(
-                    marker: marker,
-                    isRenaming: renamingID == marker.id,
-                    draftName: $draftName,
-                    renameFocused: $renameFocused,
-                    onSeek: { model.playback.seek(to: marker.time) },
-                    onDrag: { newTime in
-                        model.moveMarker(marker.id, to: max(0, min(newTime, duration)))
-                    },
-                    onBeginRename: {
-                        renamingID = marker.id
-                        draftName = marker.label
-                        DispatchQueue.main.async { renameFocused = true }
-                    },
-                    onCommitRename: {
-                        commitRename()
-                    },
-                    onCancelRename: {
-                        renamingID = nil
-                    },
-                    onChooseColor: { color in
-                        model.setMarkerColor(marker.id, color: color)
-                    },
-                    onDelete: {
-                        model.deleteMarker(marker.id)
-                    },
-                    pixelsPerSecond: pixelsPerSecond
-                )
+                let liveTime = dragTimes[marker.id] ?? marker.time
+                HStack(spacing: 0) {
+                    Spacer()
+                        .frame(width: max(0, CGFloat(liveTime) * pixelsPerSecond))
+                        .allowsHitTesting(false)
+                    MarkerPin(
+                        marker: marker,
+                        isRenaming: renamingID == marker.id,
+                        draftName: $draftName,
+                        renameFocused: $renameFocused,
+                        pixelsPerSecond: pixelsPerSecond,
+                        onSeek: { model.playback.seek(to: marker.time) },
+                        onDragChanged: { delta in
+                            let proposed = max(0, min(duration, marker.time + delta))
+                            dragTimes[marker.id] = proposed
+                        },
+                        onDragEnded: {
+                            if let proposed = dragTimes[marker.id] {
+                                model.moveMarker(marker.id, to: proposed)
+                            }
+                            dragTimes.removeValue(forKey: marker.id)
+                        },
+                        onBeginRename: {
+                            renamingID = marker.id
+                            draftName = marker.label
+                            DispatchQueue.main.async { renameFocused = true }
+                        },
+                        onCommitRename: { commitRename() },
+                        onCancelRename: { renamingID = nil },
+                        onChooseColor: { color in
+                            model.setMarkerColor(marker.id, color: color)
+                        },
+                        onDelete: { model.deleteMarker(marker.id) }
+                    )
+                    Spacer(minLength: 0)
+                        .allowsHitTesting(false)
+                }
+                .frame(width: stripWidth, height: Self.height, alignment: .topLeading)
             }
         }
-        .frame(height: height, alignment: .topLeading)
+        .frame(width: stripWidth, height: Self.height, alignment: .topLeading)
         .onChange(of: renameFocused) { _, focused in
             if !focused, renamingID != nil { commitRename() }
         }
@@ -84,25 +94,25 @@ struct TimelineMarkerStrip: View {
     }
 }
 
-/// One marker flag. Compact pill with a colored notch dropping toward the
-/// time it pins. Handles drag-to-retime + the rename text field.
+/// Compact marker flag. Click to seek, double-click to rename, drag to
+/// retime. A generous `.contentShape` plus `.highPriorityGesture` on the
+/// drag keeps the touch on this view even if a parent has its own
+/// drag-from-zero gesture.
 private struct MarkerPin: View {
     @Environment(\.theme) private var theme
     let marker: Marker
     let isRenaming: Bool
     @Binding var draftName: String
     var renameFocused: FocusState<Bool>.Binding
+    let pixelsPerSecond: CGFloat
     let onSeek: () -> Void
-    let onDrag: (TimeInterval) -> Void
+    let onDragChanged: (Double) -> Void
+    let onDragEnded: () -> Void
     let onBeginRename: () -> Void
     let onCommitRename: () -> Void
     let onCancelRename: () -> Void
     let onChooseColor: (Marker.Color) -> Void
     let onDelete: () -> Void
-    let pixelsPerSecond: CGFloat
-
-    @State private var dragStartX: CGFloat?
-    @State private var draggedTime: TimeInterval?
 
     private var tint: Color { marker.color.swiftUIColor(theme: theme) }
     private var displayLabel: String {
@@ -110,15 +120,12 @@ private struct MarkerPin: View {
     }
 
     var body: some View {
-        let liveTime = draggedTime ?? marker.time
-        let xPosition = CGFloat(liveTime) * pixelsPerSecond
+        VStack(spacing: 0) {
+            HStack(spacing: 4) {
+                Image(systemName: "flag.fill")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white)
 
-        HStack(spacing: 4) {
-            Image(systemName: "flag.fill")
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(.white)
-
-            Group {
                 if isRenaming {
                     TextField("Marker", text: $draftName)
                         .textFieldStyle(.plain)
@@ -135,48 +142,27 @@ private struct MarkerPin: View {
                         .lineLimit(1)
                 }
             }
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
-        .background(
-            UnevenRoundedRectangle(
-                topLeadingRadius: 4,
-                bottomLeadingRadius: 0,
-                bottomTrailingRadius: 4,
-                topTrailingRadius: 4
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 4).fill(tint)
             )
-            .fill(tint)
-        )
-        .shadow(color: tint.opacity(0.4), radius: 3, y: 1)
-        .overlay(alignment: .bottomLeading) {
-            // Small triangular notch dropping toward the pinned time.
-            Path { path in
-                path.move(to: CGPoint(x: 0, y: 0))
-                path.addLine(to: CGPoint(x: 6, y: 0))
-                path.addLine(to: CGPoint(x: 0, y: 5))
-                path.closeSubpath()
-            }
-            .fill(tint)
-            .frame(width: 6, height: 5)
-            .offset(y: 5)
+            .shadow(color: tint.opacity(0.45), radius: 3, y: 1)
+
+            Triangle()
+                .fill(tint)
+                .frame(width: 8, height: 5)
         }
-        .offset(x: xPosition, y: 0)
         .contentShape(Rectangle())
-        .onTapGesture { onSeek() }
         .onTapGesture(count: 2) { onBeginRename() }
-        .gesture(
-            DragGesture(minimumDistance: 4, coordinateSpace: .named(TimelineCoordinateSpace.name))
+        .onTapGesture(count: 1) { onSeek() }
+        .highPriorityGesture(
+            DragGesture(minimumDistance: 4)
                 .onChanged { value in
-                    if dragStartX == nil { dragStartX = xPosition }
-                    let newX = (dragStartX ?? xPosition) + value.translation.width
-                    let newTime = max(0, Double(newX / pixelsPerSecond))
-                    draggedTime = newTime
+                    let pps = max(1, pixelsPerSecond)
+                    onDragChanged(Double(value.translation.width / pps))
                 }
-                .onEnded { _ in
-                    if let t = draggedTime { onDrag(t) }
-                    dragStartX = nil
-                    draggedTime = nil
-                }
+                .onEnded { _ in onDragEnded() }
         )
         .contextMenu {
             Button {
@@ -204,10 +190,18 @@ private struct MarkerPin: View {
     }
 }
 
+private struct Triangle: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+        path.closeSubpath()
+        return path
+    }
+}
+
 extension Marker.Color {
-    /// Map a stored marker color to a SwiftUI `Color`, leaning on the
-    /// app theme's accent for `.accent` so the badge picks up the user's
-    /// preferred tint.
     func swiftUIColor(theme: Theme) -> Color {
         switch self {
         case .accent: return theme.colors.accent
