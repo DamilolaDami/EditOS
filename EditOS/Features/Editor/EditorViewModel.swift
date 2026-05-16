@@ -539,6 +539,58 @@ final class EditorViewModel {
         return nil
     }
 
+    // MARK: - Markers
+
+    /// Drop a marker at the current playhead. Auto-numbers the label
+    /// ("Marker 1", "Marker 2", …) so the strip is immediately readable;
+    /// the user can rename inline. Returns the new marker's id so callers
+    /// can drive a rename UI right after creating it.
+    @discardableResult
+    func addMarkerAtPlayhead() -> Marker.ID {
+        recordSnapshot()
+        let nextNumber = project.timeline.markers.count + 1
+        let marker = Marker(
+            time: max(0, playback.currentTime),
+            label: "Marker \(nextNumber)",
+            color: .accent
+        )
+        project.timeline.markers.append(marker)
+        project.timeline.markers.sort { $0.time < $1.time }
+        return marker.id
+    }
+
+    /// Move a marker to a new time on the timeline. Clamps to ≥0 and
+    /// re-sorts the markers array so subsequent lookups stay ordered.
+    func moveMarker(_ id: Marker.ID, to time: TimeInterval) {
+        recordSnapshot()
+        guard let idx = project.timeline.markers.firstIndex(where: { $0.id == id }) else { return }
+        project.timeline.markers[idx].time = max(0, time)
+        project.timeline.markers.sort { $0.time < $1.time }
+    }
+
+    func renameMarker(_ id: Marker.ID, to label: String) {
+        recordSnapshot()
+        guard let idx = project.timeline.markers.firstIndex(where: { $0.id == id }) else { return }
+        project.timeline.markers[idx].label = label
+    }
+
+    func setMarkerColor(_ id: Marker.ID, color: Marker.Color) {
+        recordSnapshot()
+        guard let idx = project.timeline.markers.firstIndex(where: { $0.id == id }) else { return }
+        project.timeline.markers[idx].color = color
+    }
+
+    func deleteMarker(_ id: Marker.ID) {
+        recordSnapshot()
+        project.timeline.markers.removeAll { $0.id == id }
+    }
+
+    func clearAllMarkers() {
+        guard !project.timeline.markers.isEmpty else { return }
+        recordSnapshot()
+        project.timeline.markers.removeAll()
+    }
+
     /// Reveal an asset's source file in Finder.
     func revealAssetInFinder(_ id: MediaAsset.ID) {
         guard let asset = project.assets.first(where: { $0.id == id }) else { return }

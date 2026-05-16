@@ -222,6 +222,47 @@ struct AppCommands: Commands {
             .disabled(editorModel?.selectedClipID == nil)
         }
 
+        CommandMenu("Markers") {
+            Button("Add Marker at Playhead") {
+                editorModel?.addMarkerAtPlayhead()
+            }
+            .keyboardShortcut("m", modifiers: [])
+            .disabled(editorModel == nil)
+
+            Divider()
+
+            Button("Jump to Previous Marker") {
+                guard let model = editorModel else { return }
+                let t = model.playback.currentTime
+                if let previous = model.project.timeline.markers
+                    .filter({ $0.time < t - 0.05 })
+                    .max(by: { $0.time < $1.time }) {
+                    model.playback.seek(to: previous.time)
+                }
+            }
+            .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+            .disabled(editorModel?.project.timeline.markers.isEmpty ?? true)
+
+            Button("Jump to Next Marker") {
+                guard let model = editorModel else { return }
+                let t = model.playback.currentTime
+                if let next = model.project.timeline.markers
+                    .filter({ $0.time > t + 0.05 })
+                    .min(by: { $0.time < $1.time }) {
+                    model.playback.seek(to: next.time)
+                }
+            }
+            .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+            .disabled(editorModel?.project.timeline.markers.isEmpty ?? true)
+
+            Divider()
+
+            Button("Clear All Markers") {
+                editorModel?.clearAllMarkers()
+            }
+            .disabled(editorModel?.project.timeline.markers.isEmpty ?? true)
+        }
+
         CommandGroup(replacing: .help) {
             Button("Replay Onboarding") {
                 UserDefaults.standard.set(false, forKey: "hasCompletedOnboarding")

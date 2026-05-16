@@ -16,6 +16,12 @@ actor ExportEngine {
         var preset: String
         var fileType: AVFileType
         var outputURL: URL
+        /// Optional chapter markers to bake into the export. Sorted by
+        /// time at write-time. We embed them as file-level title metadata
+        /// items (AVAssetExportSession can't author full chapter tracks
+        /// without AVAssetWriter, but the metadata + sidecar combo covers
+        /// the YouTube / podcast use case).
+        var chapters: [ChapterMarker] = []
 
         static func h264_1080p(to outputURL: URL) -> Settings {
             Settings(preset: AVAssetExportPreset1920x1080, fileType: .mp4, outputURL: outputURL)
@@ -24,6 +30,12 @@ actor ExportEngine {
         static func h264_4k(to outputURL: URL) -> Settings {
             Settings(preset: AVAssetExportPreset3840x2160, fileType: .mp4, outputURL: outputURL)
         }
+    }
+
+    /// A timestamped chapter title attached to the exported video.
+    struct ChapterMarker: Sendable, Hashable {
+        let time: TimeInterval
+        let title: String
     }
 
     func export(
@@ -69,6 +81,15 @@ actor ExportEngine {
         session.audioMix = await result.audioMix
         session.videoComposition = await result.videoComposition
 
+        // Attach chapter markers as file-level metadata items. Authoring
+        // a proper QuickTime chapter track requires AVAssetWriter (TODO);
+        // these metadata items survive into the .mp4 / .mov so tools that
+        // read mdta/keys atoms can still find the chapter list. The
+        // sidecar .chapters.txt written below is the user-facing fallback.
+        if !settings.chapters.isEmpty {
+            session.metadata = Self.chapterMetadataItems(from: settings.chapters)
+        }
+
         // Poll progress while the session runs so callers can drive a UI bar.
         let progressTask = Task.detached { [weak session] in
             while !Task.isCancelled {
@@ -85,6 +106,17 @@ actor ExportEngine {
 
         switch session.status {
         case .completed:
+            // Sidecar chapters file in YouTube / podcast format:
+            //   00:00 Intro
+            //   01:42 Punchline
+            // Sits next to the video so creators can paste it straight
+            // into YouTube's description box.
+            if !settings.chapters.isEmpty {
+                Self.writeChaptersSidecar(
+                    chapters: settings.chapters,
+                    outputURL: settings.outputURL
+                )
+            }
             onProgress(1.0)
             return
         case .cancelled:
@@ -122,6 +154,62 @@ actor ExportEngine {
           message:  \(description)
           userInfo: \(userInfo)
         """)
+    }
+
+    /// Build the file-level metadata items that carry chapter info. We
+    /// emit one title item per chapter plus a combined description so
+    /// tools that don't grok per-chapter items still see the list.
+    private static func chapterMetadataItems(from chapters: [ChapterMarker]) -> [AVMetadataItem] {
+        let sorted = chapters.sorted { $0.time < $1.time }
+        var items: [AVMetadataItem] = []
+
+        // Per-chapter title items (informational — proper chapter tracks
+        // need AVAssetWriter, see the issue body for the follow-up).
+        for chapter in sorted {
+            let item = AVMutableMetadataItem()
+            item.identifier = .commonIdentifierTitle
+            item.value = "\(formatTimestamp(chapter.time)) \(chapter.title)" as NSString
+            item.locale = .current
+            items.append(item)
+        }
+
+        // Single aggregated description so the chapter list shows up in
+        // file-info inspectors that read description / comment.
+        let summary = AVMutableMetadataItem()
+        summary.identifier = .commonIdentifierDescription
+        summary.value = sorted
+            .map { "\(formatTimestamp($0.time)) \($0.title)" }
+            .joined(separator: "\n") as NSString
+        items.append(summary)
+
+        return items
+    }
+
+    /// YouTube / podcast-style chapters file: one chapter per line,
+    /// `MM:SS Title` (or `H:MM:SS` past the hour). Sits beside the
+    /// rendered video so creators can paste it into upload descriptions.
+    private static func writeChaptersSidecar(chapters: [ChapterMarker], outputURL: URL) {
+        let sidecarURL = outputURL.deletingPathExtension().appendingPathExtension("chapters.txt")
+        let lines = chapters
+            .sorted { $0.time < $1.time }
+            .map { "\(formatTimestamp($0.time)) \($0.title)" }
+        let body = lines.joined(separator: "\n") + "\n"
+        do {
+            try body.write(to: sidecarURL, atomically: true, encoding: .utf8)
+        } catch {
+            log.error("Failed to write chapters sidecar: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private static func formatTimestamp(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        if h > 0 {
+            return String(format: "%d:%02d:%02d", h, m, s)
+        }
+        return String(format: "%02d:%02d", m, s)
     }
 }
 

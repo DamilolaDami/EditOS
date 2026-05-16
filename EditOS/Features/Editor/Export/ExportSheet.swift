@@ -866,10 +866,23 @@ struct ExportSheet: View {
                 } else {
                     finalComposition = composition
                 }
+                // Pull timeline markers into chapter atoms — the engine
+                // attaches them as file-level metadata and writes a
+                // YouTube/podcast-style sidecar.
+                let chapters = model.project.timeline.markers
+                    .sorted { $0.time < $1.time }
+                    .enumerated()
+                    .map { idx, marker in
+                        ExportEngine.ChapterMarker(
+                            time: marker.time,
+                            title: marker.label.isEmpty ? "Chapter \(idx + 1)" : marker.label
+                        )
+                    }
                 let settings = ExportEngine.Settings(
                     preset: chosenPreset,
                     fileType: outputFileType,
-                    outputURL: outputURL
+                    outputURL: outputURL,
+                    chapters: chapters
                 )
                 try await engine.export(finalComposition, settings: settings) { value in
                     Task { @MainActor in

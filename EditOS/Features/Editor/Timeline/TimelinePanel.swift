@@ -10,6 +10,7 @@ struct TimelinePanel: View {
     /// Pixels per second at zoom = 1.
     private let basePixelsPerSecond: CGFloat = 60
     private let headerWidth: CGFloat = 168
+    private let markerStripHeight: CGFloat = 22
     private let rulerHeight: CGFloat = 36
     private let coverLaneHeight: CGFloat = 34
     private let bottomScrubZoneHeight: CGFloat = 24
@@ -41,12 +42,12 @@ struct TimelinePanel: View {
     private var contentHeight: CGFloat {
         let tracks = model.project.timeline.tracks
         let trackTotal = tracks.reduce(0) { $0 + $1.kind.timelineHeight }
-        // ruler + cover + each track + the bottom scrub gap, separated by
-        // spacing.xxs between every pair.
-        let rowCount = CGFloat(tracks.count + 3)
+        // marker strip + ruler + cover + each track + the bottom scrub
+        // gap, separated by spacing.xxs between every pair.
+        let rowCount = CGFloat(tracks.count + 4)
         let spacings = max(0, rowCount - 1) * theme.spacing.xxs
         let padding = theme.spacing.sm * 2
-        return rulerHeight + coverLaneHeight + trackTotal + bottomScrubZoneHeight + spacings + padding
+        return markerStripHeight + rulerHeight + coverLaneHeight + trackTotal + bottomScrubZoneHeight + spacings + padding
     }
 
     /// Final panel height. Grows with track count, then clamps to a ceiling
@@ -59,6 +60,9 @@ struct TimelinePanel: View {
 
     private var headerColumn: some View {
         VStack(alignment: .leading, spacing: theme.spacing.xxs) {
+            // Marker strip placeholder so the first row aligns vertically
+            // with the timeline's marker strip.
+            Color.clear.frame(height: markerStripHeight)
             // Ruler placeholder so the first track row aligns vertically with
             // the timeline's first track row.
             Color.clear.frame(height: rulerHeight)
@@ -131,6 +135,11 @@ struct TimelinePanel: View {
         ScrollView(.horizontal, showsIndicators: true) {
             ZStack(alignment: .topLeading) {
                     VStack(alignment: .leading, spacing: theme.spacing.xxs) {
+                        TimelineMarkerStrip(
+                            model: model,
+                            pixelsPerSecond: pixelsPerSecond,
+                            duration: timelineDuration
+                        )
                         TimelineRuler(
                             duration: timelineDuration,
                             pixelsPerSecond: pixelsPerSecond,
