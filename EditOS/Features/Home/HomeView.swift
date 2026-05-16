@@ -727,15 +727,7 @@ private struct ContinueEditingCard: View {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: theme.radius.lg)
-                    .stroke(
-                        isHovering ? theme.colors.accent.opacity(0.6) : theme.colors.border,
-                        lineWidth: 1
-                    )
-            )
-            .shadow(
-                color: isHovering ? theme.colors.accent.opacity(0.18) : .black.opacity(0.18),
-                radius: isHovering ? 14 : 8,
-                y: 4
+                    .stroke(theme.colors.border, lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
@@ -878,26 +870,11 @@ private struct CreateProjectBanner: View {
                     .foregroundStyle(.white.opacity(0.10))
                     .offset(x: 22, y: compact ? 18 : 30)
             }
-            // Subtle inner glow to read more "lit" than flat fill.
-            .overlay {
-                LinearGradient(
-                    colors: [.white.opacity(0.18), .clear],
-                    startPoint: .top,
-                    endPoint: .center
-                )
-                .blendMode(.plusLighter)
-                .allowsHitTesting(false)
-            }
             .clipShape(RoundedRectangle(cornerRadius: theme.radius.lg))
             .overlay {
                 RoundedRectangle(cornerRadius: theme.radius.lg)
-                    .stroke(.white.opacity(0.14), lineWidth: 1)
+                    .stroke(.white.opacity(0.10), lineWidth: 1)
             }
-            .shadow(
-                color: topColor.opacity(isHovering ? 0.42 : 0.22),
-                radius: isHovering ? 22 : 14,
-                y: 8
-            )
         }
         .buttonStyle(.plain)
         .onHover { hovering in
@@ -991,15 +968,7 @@ private struct QuickActionCard: View {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: theme.radius.md)
-                    .stroke(
-                        isHovering ? tint.opacity(0.55) : theme.colors.border,
-                        lineWidth: 1
-                    )
-            )
-            .shadow(
-                color: isHovering ? tint.opacity(0.18) : .clear,
-                radius: isHovering ? 8 : 0,
-                y: 3
+                    .stroke(theme.colors.border, lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
