@@ -21,3 +21,9 @@ Package.resolved
 # Profiling
 *.trace
 *.xcappdata
+
+# Secrets — runtime API keys. See EditOS/Resources/Secrets.example.plist
+# for the template. Each contributor drops their own Secrets.plist into
+# the same directory and adds it to the Xcode target.
+EditOS/Resources/Secrets.plist
+Secrets.plist

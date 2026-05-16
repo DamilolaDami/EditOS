@@ -110,16 +110,26 @@ voiceover or auto-caption features.
 
 ### API keys (optional but recommended)
 
-`EditOS/Core/Services/APIKeys.swift` holds two keys:
+EditOS reads third-party credentials from a gitignored
+`EditOS/Resources/Secrets.plist`. Both integrations are optional — the
+app builds and runs without keys, the corresponding panels just gray
+out.
 
-- **GIPHY** — animated stickers. Free key at
-  [developers.giphy.com](https://developers.giphy.com/).
-- **Freesound** — sound effects. Free OAuth at
-  [freesound.org/apiv2/apply](https://freesound.org/apiv2/apply/).
+1. Copy the template:
+   ```bash
+   cp EditOS/Resources/Secrets.example.plist EditOS/Resources/Secrets.plist
+   ```
+2. Drop the file onto the EditOS target in Xcode (File → Add Files…)
+   so it's bundled. The default project uses a synchronized file
+   group, so it should pick it up automatically.
+3. Fill in your keys:
+   - **GIPHY** (animated stickers) — free key at
+     [developers.giphy.com](https://developers.giphy.com/).
+   - **Freesound** (sound effects) — free OAuth at
+     [freesound.org/apiv2/apply](https://freesound.org/apiv2/apply/).
 
-The repo currently has placeholder keys in source for ease of running;
-**rotate them before publishing your own build** and ideally move them
-into a build-time config so they're not committed.
+`Secrets.plist` is gitignored, so each contributor manages their own
+keys. The example file is checked in for reference.
 
 ### iCloud sync
 

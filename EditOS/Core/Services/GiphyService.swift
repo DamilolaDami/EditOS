@@ -16,20 +16,27 @@ actor GiphyService {
     }
 
     enum ServiceError: Error {
+        case missingAPIKey
         case badResponse
         case download
     }
 
-    private let apiKey: String
+    /// Optional so contributors can run the app without a GIPHY key.
+    /// Callers should check `isConfigured` before showing the sticker
+    /// panel; calls fail fast with `.missingAPIKey` otherwise.
+    private let apiKey: String?
     private let session: URLSession
 
-    init(apiKey: String, session: URLSession = .shared) {
+    var isConfigured: Bool { apiKey != nil }
+
+    init(apiKey: String?, session: URLSession = .shared) {
         self.apiKey = apiKey
         self.session = session
     }
 
     /// Returns trending stickers when `query` is empty, otherwise a search.
     func search(query: String, limit: Int = 30) async throws -> [Sticker] {
+        guard let apiKey else { throw ServiceError.missingAPIKey }
         let trimmed = query.trimmingCharacters(in: .whitespaces)
         let base = trimmed.isEmpty
             ? "https://api.giphy.com/v1/stickers/trending"

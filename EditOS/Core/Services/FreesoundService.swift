@@ -16,14 +16,20 @@ actor FreesoundService {
     }
 
     enum ServiceError: Error {
+        case missingToken
         case badResponse
         case download
     }
 
-    private let token: String
+    /// Optional so contributors can run the app without a Freesound
+    /// token. Callers should check `isConfigured` before exposing the
+    /// search UI; otherwise `search(query:)` fails with `.missingToken`.
+    private let token: String?
     private let session: URLSession
 
-    init(token: String, session: URLSession = .shared) {
+    var isConfigured: Bool { token != nil }
+
+    init(token: String?, session: URLSession = .shared) {
         self.token = token
         self.session = session
     }
@@ -31,6 +37,7 @@ actor FreesoundService {
     /// Searches Freesound. Empty / blank `query` defaults to a popular "music"
     /// browse so the tab has something interesting before the user types.
     func search(query: String, limit: Int = 30) async throws -> [Sound] {
+        guard let token else { throw ServiceError.missingToken }
         let trimmed = query.trimmingCharacters(in: .whitespaces)
         var comps = URLComponents(string: "https://freesound.org/apiv2/search/text/")
         comps?.queryItems = [
