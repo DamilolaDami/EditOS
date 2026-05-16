@@ -7,13 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		59D1DE5E2FB8E67E00248161 /* Packaging.log in Resources */ = {isa = PBXBuildFile; fileRef = 59D1DE582FB8E67E00248161 /* Packaging.log */; };
-		59D1DE5F2FB8E67E00248161 /* EditOS-notary.zip in Resources */ = {isa = PBXBuildFile; fileRef = 59D1DE5C2FB8E67E00248161 /* EditOS-notary.zip */; };
-		59D1DE602FB8E67E00248161 /* EditOS.app in Resources */ = {isa = PBXBuildFile; fileRef = 59D1DE562FB8E67E00248161 /* EditOS.app */; };
-		59D1DE612FB8E67E00248161 /* EditOS.xcarchive in Resources */ = {isa = PBXBuildFile; fileRef = 59D1DE5A2FB8E67E00248161 /* EditOS.xcarchive */; };
-		59D1DE622FB8E67E00248161 /* EditOS-1.0.dmg in Resources */ = {isa = PBXBuildFile; fileRef = 59D1DE5B2FB8E67E00248161 /* EditOS-1.0.dmg */; };
-		59D1DE632FB8E67E00248161 /* ExportOptions.plist in Resources */ = {isa = PBXBuildFile; fileRef = 59D1DE572FB8E67E00248161 /* ExportOptions.plist */; };
-		59D1DE642FB8E67E00248161 /* DistributionSummary.plist in Resources */ = {isa = PBXBuildFile; fileRef = 59D1DE552FB8E67E00248161 /* DistributionSummary.plist */; };
 		59D1DE692FB8EEF900248161 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 59D1DE682FB8EEF900248161 /* Sparkle */; };
 /* End PBXBuildFile section */
 
@@ -295,13 +288,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				59D1DE5E2FB8E67E00248161 /* Packaging.log in Resources */,
-				59D1DE5F2FB8E67E00248161 /* EditOS-notary.zip in Resources */,
-				59D1DE602FB8E67E00248161 /* EditOS.app in Resources */,
-				59D1DE612FB8E67E00248161 /* EditOS.xcarchive in Resources */,
-				59D1DE622FB8E67E00248161 /* EditOS-1.0.dmg in Resources */,
-				59D1DE632FB8E67E00248161 /* ExportOptions.plist in Resources */,
-				59D1DE642FB8E67E00248161 /* DistributionSummary.plist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
