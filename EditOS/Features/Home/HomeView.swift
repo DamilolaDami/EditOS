@@ -41,7 +41,14 @@ struct HomeView: View {
                 HomeHeader(syncMonitor: environment.cloudKitSyncMonitor)
                 CreateProjectBanner {
                     let project = environment.projectStore.createProject(named: "Untitled")
+                    environment.recentProjects.recordOpen(project.id)
                     openWindow(id: WindowID.editor.rawValue, value: project.id)
+                }
+                if let mostRecent = continueEditingProject {
+                    ContinueEditingCard(project: mostRecent) {
+                        environment.recentProjects.recordOpen(mostRecent.id)
+                        openWindow(id: WindowID.editor.rawValue, value: mostRecent.id)
+                    }
                 }
                 QuickActionsRow()
                 ProjectGrid(
@@ -52,6 +59,7 @@ struct HomeView: View {
                         set: { sortOptionRaw = $0.rawValue }
                     )
                 ) { project in
+                    environment.recentProjects.recordOpen(project.id)
                     openWindow(id: WindowID.editor.rawValue, value: project.id)
                 }
             }
@@ -75,11 +83,23 @@ struct HomeView: View {
                 isOnboardingPresented = false
                 if shouldCreate {
                     let project = environment.projectStore.createProject(named: "Untitled")
+                    environment.recentProjects.recordOpen(project.id)
                     openWindow(id: WindowID.editor.rawValue, value: project.id)
                 }
             }
             .interactiveDismissDisabled(true)
         }
+    }
+
+    /// Most-recently-opened project (or the freshest-modified one if no
+    /// recents are recorded yet — first-launch case where the user has
+    /// only just created a project from a previous session).
+    private var continueEditingProject: Project? {
+        if let firstRecentID = environment.recentProjects.ids.first,
+           let project = environment.projectStore.projects.first(where: { $0.id == firstRecentID }) {
+            return project
+        }
+        return nil
     }
 
     /// Apply the search and sort settings to the project list. Search matches
@@ -525,6 +545,68 @@ private struct BulletRow: View {
         }
         .padding(.horizontal, theme.spacing.md)
         .padding(.vertical, theme.spacing.sm)
+    }
+}
+
+/// "Continue editing" hero — surfaces the most-recently-opened project
+/// one tap away, right under the Create banner on the Home view.
+private struct ContinueEditingCard: View {
+    @Environment(\.theme) private var theme
+    let project: Project
+    let onOpen: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack(spacing: theme.spacing.md) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: theme.radius.sm)
+                        .fill(theme.colors.accent.opacity(0.18))
+                        .frame(width: 48, height: 48)
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(theme.colors.accent)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("CONTINUE EDITING")
+                        .font(.system(size: 9, weight: .semibold))
+                        .tracking(1.0)
+                        .foregroundStyle(theme.colors.textTertiary)
+                    Text(project.name)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(theme.colors.textPrimary)
+                        .lineLimit(1)
+                    Text(project.modifiedAt, format: .relative(presentation: .named))
+                        .font(theme.typography.caption)
+                        .foregroundStyle(theme.colors.textSecondary)
+                }
+                Spacer()
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(theme.colors.textSecondary)
+                    .offset(x: isHovering ? 4 : 0)
+                    .animation(.easeInOut(duration: 0.18), value: isHovering)
+            }
+            .padding(theme.spacing.md)
+            .background(
+                RoundedRectangle(cornerRadius: theme.radius.md)
+                    .fill(isHovering ? theme.colors.surfaceElevated : theme.colors.surface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: theme.radius.md)
+                    .stroke(
+                        isHovering ? theme.colors.accent.opacity(0.5) : theme.colors.border,
+                        lineWidth: 1
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovering = hovering
+            }
+        }
     }
 }
 

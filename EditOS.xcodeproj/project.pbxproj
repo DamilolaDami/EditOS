@@ -7,6 +7,14 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		59D1DE5E2FB8E67E00248161 /* Packaging.log in Resources */ = {isa = PBXBuildFile; fileRef = 59D1DE582FB8E67E00248161 /* Packaging.log */; };
+		59D1DE5F2FB8E67E00248161 /* EditOS-notary.zip in Resources */ = {isa = PBXBuildFile; fileRef = 59D1DE5C2FB8E67E00248161 /* EditOS-notary.zip */; };
+		59D1DE602FB8E67E00248161 /* EditOS.app in Resources */ = {isa = PBXBuildFile; fileRef = 59D1DE562FB8E67E00248161 /* EditOS.app */; };
+		59D1DE612FB8E67E00248161 /* EditOS.xcarchive in Resources */ = {isa = PBXBuildFile; fileRef = 59D1DE5A2FB8E67E00248161 /* EditOS.xcarchive */; };
+		59D1DE622FB8E67E00248161 /* EditOS-1.0.dmg in Resources */ = {isa = PBXBuildFile; fileRef = 59D1DE5B2FB8E67E00248161 /* EditOS-1.0.dmg */; };
+		59D1DE632FB8E67E00248161 /* ExportOptions.plist in Resources */ = {isa = PBXBuildFile; fileRef = 59D1DE572FB8E67E00248161 /* ExportOptions.plist */; };
+		59D1DE642FB8E67E00248161 /* DistributionSummary.plist in Resources */ = {isa = PBXBuildFile; fileRef = 59D1DE552FB8E67E00248161 /* DistributionSummary.plist */; };
+		59D1DE692FB8EEF900248161 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 59D1DE682FB8EEF900248161 /* Sparkle */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -30,6 +38,13 @@
 		59D1DD132FB8E2F300248161 /* ExportOptions.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = ExportOptions.plist; sourceTree = "<group>"; };
 		59D1DD142FB8E2F300248161 /* release.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = release.sh; sourceTree = "<group>"; };
 		59D1DD182FB8E2FE00248161 /* ROADMAP.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = ROADMAP.md; sourceTree = "<group>"; };
+		59D1DE552FB8E67E00248161 /* DistributionSummary.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = DistributionSummary.plist; sourceTree = "<group>"; };
+		59D1DE562FB8E67E00248161 /* EditOS.app */ = {isa = PBXFileReference; lastKnownFileType = wrapper.application; path = EditOS.app; sourceTree = "<group>"; };
+		59D1DE572FB8E67E00248161 /* ExportOptions.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = ExportOptions.plist; sourceTree = "<group>"; };
+		59D1DE582FB8E67E00248161 /* Packaging.log */ = {isa = PBXFileReference; lastKnownFileType = text; path = Packaging.log; sourceTree = "<group>"; };
+		59D1DE5A2FB8E67E00248161 /* EditOS.xcarchive */ = {isa = PBXFileReference; lastKnownFileType = wrapper; path = EditOS.xcarchive; sourceTree = "<group>"; };
+		59D1DE5B2FB8E67E00248161 /* EditOS-1.0.dmg */ = {isa = PBXFileReference; lastKnownFileType = file; path = "EditOS-1.0.dmg"; sourceTree = "<group>"; };
+		59D1DE5C2FB8E67E00248161 /* EditOS-notary.zip */ = {isa = PBXFileReference; lastKnownFileType = archive.zip; path = "EditOS-notary.zip"; sourceTree = "<group>"; };
 		59E9E1CD2FB5BB1F0018A0B4 /* EditOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = EditOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		59E9E1DE2FB5BB210018A0B4 /* EditOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EditOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		59E9E1E82FB5BB210018A0B4 /* EditOSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EditOSUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -71,6 +86,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				59D1DE692FB8EEF900248161 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -108,9 +124,32 @@
 			path = docs;
 			sourceTree = "<group>";
 		};
+		59D1DE592FB8E67E00248161 /* Export */ = {
+			isa = PBXGroup;
+			children = (
+				59D1DE552FB8E67E00248161 /* DistributionSummary.plist */,
+				59D1DE562FB8E67E00248161 /* EditOS.app */,
+				59D1DE572FB8E67E00248161 /* ExportOptions.plist */,
+				59D1DE582FB8E67E00248161 /* Packaging.log */,
+			);
+			path = Export;
+			sourceTree = "<group>";
+		};
+		59D1DE5D2FB8E67E00248161 /* dist */ = {
+			isa = PBXGroup;
+			children = (
+				59D1DE592FB8E67E00248161 /* Export */,
+				59D1DE5A2FB8E67E00248161 /* EditOS.xcarchive */,
+				59D1DE5B2FB8E67E00248161 /* EditOS-1.0.dmg */,
+				59D1DE5C2FB8E67E00248161 /* EditOS-notary.zip */,
+			);
+			path = dist;
+			sourceTree = "<group>";
+		};
 		59E9E1C42FB5BB1F0018A0B4 = {
 			isa = PBXGroup;
 			children = (
+				59D1DE5D2FB8E67E00248161 /* dist */,
 				59D1DD192FB8E2FE00248161 /* docs */,
 				59D1DD152FB8E2F300248161 /* scripts */,
 				59E9E1CF2FB5BB1F0018A0B4 /* EditOS */,
@@ -150,6 +189,7 @@
 			);
 			name = EditOS;
 			packageProductDependencies = (
+				59D1DE682FB8EEF900248161 /* Sparkle */,
 			);
 			productName = EditOS;
 			productReference = 59E9E1CD2FB5BB1F0018A0B4 /* EditOS.app */;
@@ -233,6 +273,9 @@
 			);
 			mainGroup = 59E9E1C42FB5BB1F0018A0B4;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				59D1DE672FB8EEF900248161 /* XCRemoteSwiftPackageReference "Sparkle" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 59E9E1CE2FB5BB1F0018A0B4 /* Products */;
 			projectDirPath = "";
@@ -250,6 +293,13 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				59D1DE5E2FB8E67E00248161 /* Packaging.log in Resources */,
+				59D1DE5F2FB8E67E00248161 /* EditOS-notary.zip in Resources */,
+				59D1DE602FB8E67E00248161 /* EditOS.app in Resources */,
+				59D1DE612FB8E67E00248161 /* EditOS.xcarchive in Resources */,
+				59D1DE622FB8E67E00248161 /* EditOS-1.0.dmg in Resources */,
+				59D1DE632FB8E67E00248161 /* ExportOptions.plist in Resources */,
+				59D1DE642FB8E67E00248161 /* DistributionSummary.plist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -667,6 +717,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		59D1DE672FB8EEF900248161 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.9.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		59D1DE682FB8EEF900248161 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 59D1DE672FB8EEF900248161 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 59E9E1C52FB5BB1F0018A0B4 /* Project object */;
 }

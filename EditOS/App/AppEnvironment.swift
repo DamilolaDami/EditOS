@@ -17,6 +17,7 @@ final class AppEnvironment {
     let freesoundService: FreesoundService
     let exportEngine: ExportEngine
     let cloudKitSyncMonitor: CloudKitSyncMonitor
+    let recentProjects: RecentProjects
 
     /// Container used to build the SwiftData-backed ProjectStore when one
     /// isn't supplied. Wired from `EditOSApp` at startup.
@@ -47,5 +48,6 @@ final class AppEnvironment {
         // monitor's init is `@MainActor`, so it can't be evaluated in the
         // caller's isolation context.
         self.cloudKitSyncMonitor = CloudKitSyncMonitor()
+        self.recentProjects = RecentProjects()
     }
 }

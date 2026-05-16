@@ -16,7 +16,30 @@ struct AppCommands: Commands {
         }
 
         CommandGroup(after: .newItem) {
+            // File → Open Recent submenu, populated from RecentProjects.
+            // The list is built every time the menu opens because
+            // SwiftUI's Commands re-evaluate body when @Observable
+            // dependencies change.
+            Menu("Open Recent") {
+                let recents = environment.recentProjects.liveProjects(from: environment.projectStore)
+                if recents.isEmpty {
+                    Button("No Recent Projects") {}.disabled(true)
+                } else {
+                    ForEach(recents) { project in
+                        Button(project.name) {
+                            environment.recentProjects.recordOpen(project.id)
+                            openWindow(id: WindowID.editor.rawValue, value: project.id)
+                        }
+                    }
+                    Divider()
+                    Button("Clear Menu") {
+                        environment.recentProjects.clear()
+                    }
+                }
+            }
+
             Divider()
+
             Button("Show Projects Window") {
                 openWindow(id: WindowID.home.rawValue)
             }

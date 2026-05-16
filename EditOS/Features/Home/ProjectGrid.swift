@@ -240,6 +240,7 @@ struct ProjectCard: View {
         .alert("Delete project?", isPresented: $isConfirmingDelete) {
             Button("Cancel", role: .cancel) { }
             Button("Delete", role: .destructive) {
+                environment.recentProjects.forget(project.id)
                 environment.projectStore.delete(project)
             }
         } message: {
