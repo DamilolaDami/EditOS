@@ -38,6 +38,7 @@ struct HomeView: View {
     private var homeDetail: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: theme.spacing.xl) {
+                UpdateBanner(sparkle: environment.sparkle)
                 HomeHeader(
                     syncMonitor: environment.cloudKitSyncMonitor,
                     projects: environment.projectStore.projects
@@ -197,6 +198,77 @@ enum HomeSection: String, Hashable, CaseIterable {
         case .templates: "rectangle.stack"
         case .media: "photo.stack"
         case .designStudio: "paintpalette"
+        }
+    }
+}
+
+/// In-app "Update available" banner. Renders only when Sparkle has
+/// found a new version through one of its automatic background checks.
+/// Two actions: **Install** kicks the user into Sparkle's normal install
+/// dialog (signature-verified, sandbox-XPC-driven), and **Dismiss**
+/// hides the banner until the next check finds it again.
+private struct UpdateBanner: View {
+    @Environment(\.theme) private var theme
+    @ObservedObject var sparkle: SparkleUpdater
+
+    var body: some View {
+        if let item = sparkle.availableUpdate {
+            HStack(spacing: theme.spacing.md) {
+                ZStack {
+                    Circle()
+                        .fill(theme.colors.accent.opacity(0.16))
+                        .frame(width: 36, height: 36)
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(theme.colors.accent)
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Update available")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(theme.colors.textPrimary)
+                    Text("EditOS \(item.displayVersionString) is ready to install.")
+                        .font(theme.typography.caption)
+                        .foregroundStyle(theme.colors.textSecondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    sparkle.installAvailableUpdate()
+                } label: {
+                    Text("Install")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule().fill(theme.colors.accent)
+                        )
+                }
+                .buttonStyle(.plain)
+                Button {
+                    sparkle.dismissBanner()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(theme.colors.textSecondary)
+                        .frame(width: 24, height: 24)
+                        .background(Circle().fill(theme.colors.surface))
+                        .overlay(Circle().stroke(theme.colors.border, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help("Dismiss until next check")
+            }
+            .padding(.horizontal, theme.spacing.md)
+            .padding(.vertical, theme.spacing.sm)
+            .background(
+                RoundedRectangle(cornerRadius: theme.radius.md)
+                    .fill(theme.colors.surface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: theme.radius.md)
+                    .stroke(theme.colors.accent.opacity(0.45), lineWidth: 1)
+            )
+            .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
 }

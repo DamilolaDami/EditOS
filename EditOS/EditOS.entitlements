@@ -24,5 +24,20 @@
 	<string>$(TeamIdentifierPrefix)$(CFBundleIdentifier)</string>
 	<key>com.apple.security.network.client</key>
 	<true/>
+
+	<!--
+	Sparkle 2 in a sandboxed app launches its installer XPC service
+	via a mach lookup. The sandbox blocks that lookup by default,
+	surfacing in the UI as "An error occurred while launching the
+	installer." Adding `org.sparkle-project.InstallerLauncher` to the
+	temporary-exception list unblocks the install flow. The downloader
+	XPC service runs in-session (JoinExistingSession=true) so it
+	doesn't need its own exception.
+	Reference: https://sparkle-project.org/documentation/sandboxing/
+	-->
+	<key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
+	<array>
+		<string>org.sparkle-project.InstallerLauncher</string>
+	</array>
 </dict>
 </plist>

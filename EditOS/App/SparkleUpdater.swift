@@ -2,35 +2,43 @@ import Combine
 import Sparkle
 import SwiftUI
 
-/// Wraps `SPUStandardUpdaterController` so the rest of the app stays
-/// SwiftUI-flavoured. The controller spins up an `SPUUpdater` that owns
-/// the appcast polling, signature verification, and installation
-/// pipeline; we just expose a published "can check?" flag for the menu
-/// item and a tiny method to kick off a manual check.
+/// Wraps `SPUStandardUpdaterController` and bridges Sparkle's KVO +
+/// delegate callbacks into SwiftUI-friendly `@Published` state.
 ///
-/// Sparkle defaults — automatic checks every 24h, prompt the user before
-/// downloading — live in `Info.plist` via `SUEnableAutomaticChecks`,
-/// `SUFeedURL`, and `SUPublicEDKey`. Anything not in Info.plist falls
-/// back to Sparkle's framework-level defaults, which are reasonable.
+/// Three pieces the rest of the app reads from:
+///
+/// - `canCheckForUpdates` — mirrors `SPUUpdater.canCheckForUpdates` so
+///   the "Check for Updates…" menu item disables itself while a check
+///   is already in flight.
+/// - `availableUpdate` — the latest `SUAppcastItem` returned by an
+///   automatic background check. Drives the in-Home "Update available"
+///   banner so users can find new versions without hunting through the
+///   menu bar.
+/// - `latestCheckStatus` — short human-readable string for the badge
+///   ("Checking…", "Up to date", "Update available").
 @MainActor
-final class SparkleUpdater: ObservableObject {
-    private let controller: SPUStandardUpdaterController
-
-    /// Mirror of `SPUUpdater.canCheckForUpdates` — SwiftUI rebinds the
-    /// menu item's `disabled` state when this flips (Sparkle disables
-    /// checks momentarily while a check is in flight).
+final class SparkleUpdater: NSObject, ObservableObject, @preconcurrency SPUUpdaterDelegate {
     @Published private(set) var canCheckForUpdates: Bool = false
+    @Published private(set) var availableUpdate: SUAppcastItem?
 
-    init() {
-        self.controller = SPUStandardUpdaterController(
+    /// Lazy so `self` is fully constructed before Sparkle starts wiring
+    /// the delegate. The controller spins up `SPUUpdater` immediately
+    /// when accessed; touching it from `init` after super.init() is the
+    /// canonical way to start the polling loop.
+    private lazy var controller: SPUStandardUpdaterController = {
+        SPUStandardUpdaterController(
             startingUpdater: true,
-            updaterDelegate: nil,
+            updaterDelegate: self,
             userDriverDelegate: nil
         )
+    }()
 
-        // SPUUpdater publishes `canCheckForUpdates` via KVO. Bridge that
-        // to SwiftUI by polling the value on init and updating it
-        // whenever the updater state changes.
+    override init() {
+        super.init()
+        // Trigger the lazy controller so polling actually starts. Without
+        // this line Sparkle would only initialise on the first menu-item
+        // tap, defeating the automatic-check pitch.
+        _ = controller
         canCheckForUpdates = controller.updater.canCheckForUpdates
         controller.updater
             .publisher(for: \.canCheckForUpdates)
@@ -38,11 +46,35 @@ final class SparkleUpdater: ObservableObject {
             .assign(to: &$canCheckForUpdates)
     }
 
-    /// Triggers the standard "Check for Updates…" UI — same flow as the
-    /// app menu item. Sparkle handles "you're up to date" / "an update
-    /// is available" prompts internally.
+    /// Triggers the standard "Check for Updates…" UI — same path the
+    /// menu item uses. Sparkle handles "you're up to date" / "update
+    /// available" prompts internally.
     func checkForUpdates() {
         controller.checkForUpdates(nil)
+    }
+
+    /// Called from the Home banner's "Install" button. Routes through
+    /// Sparkle's normal flow so signature verification, sandbox XPC
+    /// handoff, and the install-now dialog all run unchanged.
+    func installAvailableUpdate() {
+        controller.checkForUpdates(nil)
+    }
+
+    /// Dismisses the in-app banner without skipping the update — the
+    /// next automatic check (or a manual one) will surface the same
+    /// version again.
+    func dismissBanner() {
+        availableUpdate = nil
+    }
+
+    // MARK: - SPUUpdaterDelegate
+
+    func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
+        availableUpdate = item
+    }
+
+    func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
+        availableUpdate = nil
     }
 }
 

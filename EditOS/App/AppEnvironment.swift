@@ -18,6 +18,7 @@ final class AppEnvironment {
     let exportEngine: ExportEngine
     let cloudKitSyncMonitor: CloudKitSyncMonitor
     let recentProjects: RecentProjects
+    let sparkle: SparkleUpdater
 
     /// Container used to build the SwiftData-backed ProjectStore when one
     /// isn't supplied. Wired from `EditOSApp` at startup.
@@ -49,5 +50,10 @@ final class AppEnvironment {
         // caller's isolation context.
         self.cloudKitSyncMonitor = CloudKitSyncMonitor()
         self.recentProjects = RecentProjects()
+        // Sparkle also has to live here for a single source of truth —
+        // EditOSApp had its own @StateObject, but the Home view also
+        // needs to observe `availableUpdate` to drive the in-app
+        // banner, so we centralise it.
+        self.sparkle = SparkleUpdater()
     }
 }
