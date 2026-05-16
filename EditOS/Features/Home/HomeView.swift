@@ -321,7 +321,7 @@ private struct HomeHeader: View {
                             )
                             .offset(y: 2)
                     }
-                    Text("Open-source video editor for macOS")
+                    Text("Pro-grade video editing, open-source.")
                         .font(theme.typography.body)
                         .foregroundStyle(theme.colors.textSecondary)
                 }
