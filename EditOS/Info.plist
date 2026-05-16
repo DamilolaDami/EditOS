@@ -2,9 +2,23 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>remote-notification</string>
-	</array>
+	<!--
+	Most Info.plist keys come from build settings:
+	  - INFOPLIST_KEY_NSMicrophoneUsageDescription
+	  - INFOPLIST_KEY_NSSpeechRecognitionUsageDescription
+	  - GENERATE_INFOPLIST_FILE = YES (merges this file with the
+	    generated one at build time).
+	Anything macOS-specific that the build-setting generators don't
+	cover lives here.
+	-->
+
+	<!-- Finder / Launchpad category. Surfaces the app under the Video
+	     section of category-aware browsers. -->
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.video</string>
+
+	<!-- Shown in Finder "Get Info" and the macOS About dialog. -->
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 Damilola. MIT License.</string>
 </dict>
 </plist>

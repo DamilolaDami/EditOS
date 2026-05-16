@@ -2,10 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>aps-environment</key>
-	<string>development</string>
-	<key>com.apple.developer.aps-environment</key>
-	<string>development</string>
+	<!--
+	Capabilities that live OUTSIDE Xcode's build-setting generators
+	(ENABLE_APP_SANDBOX, ENABLE_RESOURCE_ACCESS_AUDIO_INPUT, etc., which
+	are emitted as their canonical com.apple.security.* keys at build
+	time). Anything new should be added here only if it isn't already
+	covered by a build-setting flag.
+	-->
+
 	<key>com.apple.developer.icloud-container-identifiers</key>
 	<array>
 		<string>iCloud.com.damioffice.EditOS</string>
@@ -13,7 +17,6 @@
 	<key>com.apple.developer.icloud-services</key>
 	<array>
 		<string>CloudKit</string>
-		<string>CloudDocuments</string>
 	</array>
 	<key>com.apple.developer.ubiquity-container-identifiers</key>
 	<array/>
