@@ -13,6 +13,19 @@
 
              Format reference:
              https://sparkle-project.org/documentation/publishing/ -->
+        <item>
+             <title>EditOS 1.0</title>
+             <pubDate>Sat, 16 May 2026 18:49:11 +0000</pubDate>
+             <sparkle:version>1</sparkle:version>
+             <sparkle:shortVersionString>1.0</sparkle:shortVersionString>
+             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+             <description><![CDATA[See https://github.com/DamilolaDami/EditOS/releases/tag/v1.0]]></description>
+             <enclosure
+                 url="https://github.com/DamilolaDami/EditOS/releases/download/v1.0/EditOS-1.0.dmg"
+                 sparkle:edSignature="XRN2KUNaVrNaf0xhTUTv2pu/bBhkk41lYbOqxupwWVnOSlH6PSXSIFL/41DGZ5APMrw4INeCF0lPx1sATheBBQ==" length="4586103"
+                 type="application/octet-stream" />
+         </item>
+
 
         <item>
             <title>EditOS 1.0</title>
