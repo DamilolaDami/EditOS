@@ -1,0 +1,37 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>EditOS — Releases</title>
+        <link>https://damiloladami.github.io/EditOS/appcast.xml</link>
+        <description>Automatic-update feed for EditOS.</description>
+        <language>en</language>
+
+        <!-- Newest release at the top. Each <item> is one downloadable
+             build, signed with the EdDSA private key matching the
+             SUPublicEDKey in the app's Info.plist. New items get added
+             by scripts/release.sh on every successful release run.
+
+             Format reference:
+             https://sparkle-project.org/documentation/publishing/ -->
+
+        <item>
+            <title>EditOS 1.0</title>
+            <pubDate>Fri, 16 May 2026 18:50:00 +0000</pubDate>
+            <sparkle:version>1</sparkle:version>
+            <sparkle:shortVersionString>1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[
+                <p>First public release. Multi-track timeline, speed
+                ramping, cross-clip transitions, voiceover + ducking,
+                auto-captions, animated stickers, multi-format export.</p>
+                <p>Full changelog:
+                <a href="https://github.com/DamilolaDami/EditOS/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</p>
+            ]]></description>
+            <enclosure
+                url="https://github.com/DamilolaDami/EditOS/releases/download/v1.0.0/EditOS-1.0.dmg"
+                sparkle:edSignature="0JjHnMfnVN1Rl3GEyw86vw7Gk/zd8YlqIR2iA4pHlsA0YlzqyvAaw7uU7xnyCZbAR/wG+hgbtPDXVb9BUPOXAg=="
+                length="4586126"
+                type="application/octet-stream" />
+        </item>
+    </channel>
+</rss>

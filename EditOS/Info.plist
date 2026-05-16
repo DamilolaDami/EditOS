@@ -20,5 +20,20 @@
 	<!-- Shown in Finder "Get Info" and the macOS About dialog. -->
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 Damilola. MIT License.</string>
+
+	<!-- Sparkle (auto-update). The public key verifies update payload
+	     signatures so an attacker can't push a malicious binary down
+	     the appcast feed. The matching private key lives only in the
+	     maintainer's login keychain and is used by sign_update at
+	     release time. The feed URL points at a GitHub Pages-served
+	     appcast.xml in docs/. -->
+	<key>SUPublicEDKey</key>
+	<string>RLUgv+FtXX+Loh1mipzBEyjP2OzcwueavTk6lO38XzI=</string>
+	<key>SUFeedURL</key>
+	<string>https://damiloladami.github.io/EditOS/appcast.xml</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>

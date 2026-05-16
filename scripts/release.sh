@@ -215,3 +215,44 @@ printf "  App     : %s\n" "$APP_PATH"
 printf "  DMG     : %s\n" "$DMG_PATH"
 printf "  Archive : %s\n" "$ARCHIVE_PATH"
 printf "  Size    : %s\n" "$(du -h "$DMG_PATH" | awk '{print $1}')"
+
+# ----------------------------------------------------------------------
+# 5. Sparkle: sign the DMG so the appcast can serve it as an update.
+# ----------------------------------------------------------------------
+
+# `sign_update` lives inside Sparkle's SPM artifact directory. Resolve
+# it lazily so the script keeps working even if the path changes across
+# Sparkle versions.
+SIGN_UPDATE=$(find "$HOME/Library/Developer/Xcode/DerivedData" \
+    -path "*/SourcePackages/artifacts/sparkle/Sparkle/bin/sign_update" \
+    2>/dev/null | head -1)
+
+if [[ -n "$SIGN_UPDATE" && -x "$SIGN_UPDATE" ]]; then
+    say "Signing DMG for Sparkle appcast"
+    SIG_LINE=$("$SIGN_UPDATE" "$DMG_PATH")
+    DMG_SIZE=$(stat -f%z "$DMG_PATH")
+    PUB_DATE=$(date -u +"%a, %d %b %Y %H:%M:%S +0000")
+    DOWNLOAD_URL="https://github.com/DamilolaDami/EditOS/releases/download/v${VERSION}/$(basename "$DMG_PATH")"
+
+    cat <<EOF
+
+  Sparkle appcast entry — paste this into docs/appcast.xml above the
+  existing <item> blocks, then commit:
+
+        <item>
+            <title>EditOS ${VERSION}</title>
+            <pubDate>${PUB_DATE}</pubDate>
+            <sparkle:version>${BUILD}</sparkle:version>
+            <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[See https://github.com/DamilolaDami/EditOS/releases/tag/v${VERSION}]]></description>
+            <enclosure
+                url="${DOWNLOAD_URL}"
+                ${SIG_LINE}
+                type="application/octet-stream" />
+        </item>
+
+EOF
+else
+    warn "sign_update not found — install Sparkle SPM dependency and rebuild once, then re-run for Sparkle appcast signing."
+fi

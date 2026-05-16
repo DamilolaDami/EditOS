@@ -10,6 +10,12 @@ struct EditOSApp: App {
     let modelContainer: ModelContainer
     @State private var environment: AppEnvironment
 
+    /// Sparkle auto-updater. Created once at launch — Sparkle owns its
+    /// own scheduling, KVO publishing, and signature verification from
+    /// here on. The "Check for Updates…" menu item in AppCommands binds
+    /// to its `canCheckForUpdates` state.
+    @StateObject private var sparkle = SparkleUpdater()
+
     init() {
         let container: ModelContainer
         do {
@@ -40,7 +46,7 @@ struct EditOSApp: App {
                 .frame(minWidth: 960, minHeight: 640)
         }
         .windowResizability(.contentMinSize)
-        .commands { AppCommands(environment: environment) }
+        .commands { AppCommands(environment: environment, sparkle: sparkle) }
 
         WindowGroup("Editor", id: WindowID.editor.rawValue, for: Project.ID.self) { $projectID in
             EditorHost(projectID: projectID)

@@ -2,11 +2,20 @@ import SwiftUI
 
 struct AppCommands: Commands {
     let environment: AppEnvironment
+    let sparkle: SparkleUpdater
 
     @Environment(\.openWindow) private var openWindow
     @FocusedValue(\.editorModel) private var editorModel
 
     var body: some Commands {
+        // "Check for Updates…" lives under the EditOS application
+        // menu (top of the menu bar), where every Mac user expects it.
+        // CommandGroup(after: .appInfo) places it right under "About
+        // EditOS".
+        CommandGroup(after: .appInfo) {
+            CheckForUpdatesMenuItem(updater: sparkle)
+        }
+
         CommandGroup(replacing: .newItem) {
             Button("New Project") {
                 let project = environment.projectStore.createProject(named: "Untitled")
