@@ -114,10 +114,15 @@ fi
 
 say "Exporting signed .app"
 rm -rf "$EXPORT_DIR"
+# -allowProvisioningUpdates lets xcodebuild contact Apple's portal and
+# create the Developer ID provisioning profile for this bundle ID on
+# the fly. Without it, the first-ever export fails with
+# "No profiles for 'com.damioffice.EditOS' were found".
 xcodebuild -exportArchive \
     -archivePath "$ARCHIVE_PATH" \
     -exportPath "$EXPORT_DIR" \
     -exportOptionsPlist "$EXPORT_OPTIONS_PLIST" \
+    -allowProvisioningUpdates \
     | grep -E "(error:|warning:|\*\* )" || true
 
 [[ -d "$APP_PATH" ]] || fail "Export missing at $APP_PATH."
@@ -129,8 +134,14 @@ codesign --verify --deep --strict --verbose=2 "$APP_PATH" 2>&1 \
     | grep -E "valid on disk|satisfies its Designated Requirement" || true
 
 # Hardened runtime + secure timestamp are notarization requirements.
-codesign --display --verbose=2 "$APP_PATH" 2>&1 \
-    | grep -q "flags=.*runtime" || fail "Bundle isn't hardened-runtime-signed. Check ENABLE_HARDENED_RUNTIME in build settings."
+# Capture into a variable so `set -o pipefail` doesn't make a successful
+# `grep` look like a failure when codesign's exit codes interact oddly
+# with the pipeline.
+codesign_flags=$(codesign --display --verbose=2 "$APP_PATH" 2>&1 || true)
+if ! echo "$codesign_flags" | grep -q "flags=.*runtime"; then
+    echo "$codesign_flags"
+    fail "Bundle isn't hardened-runtime-signed. Check ENABLE_HARDENED_RUNTIME in build settings."
+fi
 
 # ----------------------------------------------------------------------
 # 3. Notarize
@@ -179,9 +190,18 @@ hdiutil create \
 
 rm -rf "$STAGING"
 
-# Notarization tickets staple to .app and .dmg independently. Stapling
-# the DMG too means Gatekeeper validates the wrapper offline.
-say "Stapling DMG"
+# Notarization tickets are issued per-hash, so the .app's ticket
+# doesn't apply to the DMG file itself. To make the DMG offline-
+# verifiable we submit it to notary too. (The .app inside is already
+# stapled — this just gets a separate ticket for the outer wrapper so
+# Gatekeeper doesn't have to hit Apple's servers the first time a user
+# opens the DMG.)
+say "Notarizing DMG (separate ticket from the .app)"
+xcrun notarytool submit "$DMG_PATH" \
+    --keychain-profile "$NOTARY_PROFILE" \
+    --wait
+
+say "Stapling DMG ticket"
 xcrun stapler staple "$DMG_PATH"
 xcrun stapler validate "$DMG_PATH"
 
