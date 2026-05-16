@@ -45,6 +45,7 @@
 		59D1DE5A2FB8E67E00248161 /* EditOS.xcarchive */ = {isa = PBXFileReference; lastKnownFileType = wrapper; path = EditOS.xcarchive; sourceTree = "<group>"; };
 		59D1DE5B2FB8E67E00248161 /* EditOS-1.0.dmg */ = {isa = PBXFileReference; lastKnownFileType = file; path = "EditOS-1.0.dmg"; sourceTree = "<group>"; };
 		59D1DE5C2FB8E67E00248161 /* EditOS-notary.zip */ = {isa = PBXFileReference; lastKnownFileType = archive.zip; path = "EditOS-notary.zip"; sourceTree = "<group>"; };
+		59D1DE6C2FB8F11F00248161 /* appcast.xml */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = appcast.xml; sourceTree = "<group>"; };
 		59E9E1CD2FB5BB1F0018A0B4 /* EditOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = EditOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		59E9E1DE2FB5BB210018A0B4 /* EditOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EditOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		59E9E1E82FB5BB210018A0B4 /* EditOSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EditOSUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -120,6 +121,7 @@
 			isa = PBXGroup;
 			children = (
 				59D1DD182FB8E2FE00248161 /* ROADMAP.md */,
+				59D1DE6C2FB8F11F00248161 /* appcast.xml */,
 			);
 			path = docs;
 			sourceTree = "<group>";

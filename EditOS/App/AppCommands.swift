@@ -8,20 +8,24 @@ struct AppCommands: Commands {
     @FocusedValue(\.editorModel) private var editorModel
 
     var body: some Commands {
-        // "Check for Updates…" lives under the EditOS application
-        // menu (top of the menu bar), where every Mac user expects it.
-        // CommandGroup(after: .appInfo) places it right under "About
-        // EditOS".
-        CommandGroup(after: .appInfo) {
-            CheckForUpdatesMenuItem(updater: sparkle)
-        }
-
-        CommandGroup(replacing: .newItem) {
-            Button("New Project") {
-                let project = environment.projectStore.createProject(named: "Untitled")
-                openWindow(id: WindowID.editor.rawValue, value: project.id)
+        // Wrapping the app-menu Check-for-Updates and the File menu
+        // pair in a Group keeps us under the CommandsBuilder arity
+        // limit (10 top-level builders).
+        Group {
+            // "Check for Updates…" lives under the EditOS application
+            // menu (top of the menu bar), right below "About EditOS",
+            // where every Mac user expects it.
+            CommandGroup(after: .appInfo) {
+                CheckForUpdatesMenuItem(updater: sparkle)
             }
-            .keyboardShortcut("n", modifiers: .command)
+
+            CommandGroup(replacing: .newItem) {
+                Button("New Project") {
+                    let project = environment.projectStore.createProject(named: "Untitled")
+                    openWindow(id: WindowID.editor.rawValue, value: project.id)
+                }
+                .keyboardShortcut("n", modifiers: .command)
+            }
         }
 
         CommandGroup(after: .newItem) {
