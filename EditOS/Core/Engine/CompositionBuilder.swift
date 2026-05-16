@@ -262,6 +262,10 @@ struct CompositionBuilder: Sendable {
             let start: TimeInterval
             let end: TimeInterval
             let kind: FadeKind
+            /// RGB triplet (0…1) for the colour to dip *through*. Defaults
+            /// to black for `fadeIn` / `fadeOut`; transitions may override
+            /// to white (`dipToWhite`).
+            let dipColor: (r: Double, g: Double, b: Double)
             enum FadeKind: Sendable { case `in`, out }
         }
         var fades: [FadeRange] = []
@@ -272,16 +276,65 @@ struct CompositionBuilder: Sendable {
                     fades.append(FadeRange(
                         start: clip.timeRange.start,
                         end: min(clip.timeRange.end, clip.timeRange.start + duration),
-                        kind: .in
+                        kind: .in,
+                        dipColor: (0, 0, 0)
                     ))
                 }
                 if clip.fadeOut {
                     fades.append(FadeRange(
                         start: max(clip.timeRange.start, clip.timeRange.end - duration),
                         end: clip.timeRange.end,
-                        kind: .out
+                        kind: .out,
+                        dipColor: (0, 0, 0)
                     ))
                 }
+            }
+        }
+
+        // Cross-clip transitions are rendered as a back-to-back dip-out /
+        // dip-in pair around the cut. A true pixel-blended crossfade needs
+        // a custom `AVVideoCompositing` implementation (tracked as a
+        // follow-up); the dip path uses the existing single-track opacity
+        // ramp infrastructure and still reads as a smooth transition.
+        for track in project.timeline.tracks where track.kind == .video && !track.isHidden {
+            let sortedClips = track.clips.sorted { $0.timeRange.start < $1.timeRange.start }
+            for (idx, clip) in sortedClips.enumerated() {
+                guard let transition = clip.transitionToNext else { continue }
+                guard idx + 1 < sortedClips.count else { continue }
+                let next = sortedClips[idx + 1]
+
+                // Only meaningful when the clips actually abut (or are
+                // close to it). Skip if there's a gap larger than 0.1s.
+                guard abs(next.timeRange.start - clip.timeRange.end) < 0.1 else { continue }
+
+                // Clamp so the dip never grows past either clip's bounds.
+                let half = min(
+                    transition.duration / 2,
+                    clip.timeRange.duration * 0.5,
+                    next.timeRange.duration * 0.5
+                )
+                guard half > 0.01 else { continue }
+
+                let dipColor: (Double, Double, Double)
+                switch transition.kind {
+                case .crossfade, .dipToBlack: dipColor = (0, 0, 0)
+                case .dipToWhite:             dipColor = (1, 1, 1)
+                }
+
+                // Outgoing leg: clip's last `half` seconds ramp to dipColor.
+                fades.append(FadeRange(
+                    start: clip.timeRange.end - half,
+                    end: clip.timeRange.end,
+                    kind: .out,
+                    dipColor: dipColor
+                ))
+                // Incoming leg: next clip's first `half` seconds ramp in.
+                fades.append(FadeRange(
+                    start: next.timeRange.start,
+                    end: next.timeRange.start + half,
+                    kind: .in,
+                    dipColor: dipColor
+                ))
             }
         }
 
@@ -409,25 +462,33 @@ struct CompositionBuilder: Sendable {
                     }
                 }
 
-                // Fade in / out — black overlay with ramped alpha. Single
-                // shared video track means we can't crossfade between
-                // clips, but fading to/from black is a usable approximation.
-                if let fade = fades.first(where: { t >= $0.start && t < $0.end }) {
+                // Fade / transition — coloured overlay with ramped alpha.
+                // The same machinery handles fadeIn/Out *and* cross-clip
+                // transitions (rendered as a dip-through-color for V1; a
+                // true pixel-blended crossfade is tracked separately).
+                // Multiple fades may overlap (e.g. one clip's transition
+                // out at the same time as another's transition in on a
+                // different track) so we composite each in turn.
+                for fade in fades where t >= fade.start && t < fade.end {
                     let span = max(0.001, fade.end - fade.start)
                     let progress = (t - fade.start) / span
                     let alpha: Double = fade.kind == .in
                         ? max(0, 1 - progress)
                         : max(0, progress)
-                    if alpha > 0.001 {
-                        let blackVeil = CIImage(color: CIColor.black).cropped(to: canvasRect)
-                        let matrix = CIFilter.colorMatrix()
-                        matrix.inputImage = blackVeil
-                        matrix.aVector = CIVector(x: 0, y: 0, z: 0, w: alpha)
-                        if let veil = matrix.outputImage, isValid(veil) {
-                            let veiled = veil.composited(over: result)
-                            if isValid(veiled) {
-                                result = veiled
-                            }
+                    guard alpha > 0.001 else { continue }
+                    let veilColor = CIColor(
+                        red: fade.dipColor.r,
+                        green: fade.dipColor.g,
+                        blue: fade.dipColor.b
+                    )
+                    let baseVeil = CIImage(color: veilColor).cropped(to: canvasRect)
+                    let matrix = CIFilter.colorMatrix()
+                    matrix.inputImage = baseVeil
+                    matrix.aVector = CIVector(x: 0, y: 0, z: 0, w: alpha)
+                    if let veil = matrix.outputImage, isValid(veil) {
+                        let veiled = veil.composited(over: result)
+                        if isValid(veiled) {
+                            result = veiled
                         }
                     }
                 }

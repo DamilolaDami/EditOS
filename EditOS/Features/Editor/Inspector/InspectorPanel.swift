@@ -118,6 +118,7 @@ private struct ClipInspector: View {
             case .media:
                 timingSection(showSpeed: true)
                 speedRampSection
+                transitionSection
                 audioSection
                 captionsSection
                 transformSection
@@ -156,6 +157,76 @@ private struct ClipInspector: View {
                 isMuted: (currentClip(clip.id)?.volume ?? clip.volume) == 0,
                 onToggle: { model.toggleClipMuted(clip.id) }
             )
+        }
+    }
+
+    /// Cross-clip transition (crossfade / dip-to-black). Shown only when
+    /// this clip has a following clip on the same video track — that's
+    /// the adjacency a transition can blend across.
+    private var transitionSection: some View {
+        let following = model.clipFollowing(clip.id)
+        let liveClip = currentClip(clip.id) ?? clip
+        let maxDuration: TimeInterval = {
+            guard let following else { return 2.0 }
+            return min(
+                liveClip.timeRange.duration / 2,
+                following.timeRange.duration / 2,
+                4.0
+            )
+        }()
+
+        return Group {
+            if let following, following.kind == .media {
+                InspectorSection(title: "Transition Out", systemImage: "rectangle.2.swap") {
+                    HStack(spacing: 6) {
+                        TransitionChip(
+                            label: "None",
+                            systemImage: "scissors",
+                            isSelected: liveClip.transitionToNext == nil
+                        ) {
+                            model.setTransition(nil, on: clip.id)
+                        }
+                        ForEach(Transition.Kind.allCases) { kind in
+                            TransitionChip(
+                                label: kind.displayName,
+                                systemImage: kind.systemImage,
+                                isSelected: liveClip.transitionToNext?.kind == kind
+                            ) {
+                                let duration = liveClip.transitionToNext?.duration ?? 0.5
+                                model.setTransition(
+                                    Transition(kind: kind, duration: min(duration, maxDuration)),
+                                    on: clip.id
+                                )
+                            }
+                        }
+                    }
+
+                    if liveClip.transitionToNext != nil {
+                        SliderRow(
+                            label: "Duration",
+                            value: Binding(
+                                get: { liveClip.transitionToNext?.duration ?? 0.5 },
+                                set: { newValue in
+                                    let clamped = max(0.05, min(newValue, maxDuration))
+                                    let kind = liveClip.transitionToNext?.kind ?? .crossfade
+                                    model.setTransition(
+                                        Transition(kind: kind, duration: clamped),
+                                        on: clip.id
+                                    )
+                                }
+                            ),
+                            range: 0.1...max(0.2, maxDuration),
+                            format: { String(format: "%.2fs", $0) },
+                            onCommit: reload
+                        )
+                    }
+
+                    Text("Blends with “\(following.label ?? "next clip")”.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(theme.colors.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
     }
 
@@ -511,6 +582,53 @@ private struct ClipInspector: View {
 }
 
 // MARK: - Shared
+
+private struct TransitionChip: View {
+    @Environment(\.theme) private var theme
+    let label: String
+    let systemImage: String
+    let isSelected: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            VStack(spacing: 3) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 9, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7)
+            .padding(.horizontal, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(
+                        isSelected
+                            ? AnyShapeStyle(
+                                LinearGradient(
+                                    colors: [theme.colors.accent, theme.colors.accent.opacity(0.8)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            : AnyShapeStyle(theme.colors.surface)
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(
+                        isSelected ? Color.white.opacity(0.15) : theme.colors.border,
+                        lineWidth: 1
+                    )
+            )
+            .foregroundStyle(isSelected ? .white : theme.colors.textPrimary)
+        }
+        .buttonStyle(.plain)
+    }
+}
 
 private struct InspectorSection<Content: View>: View {
     @Environment(\.theme) private var theme

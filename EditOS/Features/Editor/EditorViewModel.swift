@@ -539,6 +539,49 @@ final class EditorViewModel {
         return nil
     }
 
+    // MARK: - Transitions
+
+    /// Set the outgoing transition for a clip. Pass `nil` to clear it
+    /// (hard cut). The composition pipeline picks this up on its next
+    /// rebuild — transitions overlap with the following clip and bake
+    /// the blend into the rendered output.
+    func setTransition(_ transition: Transition?, on id: Clip.ID) {
+        recordSnapshot()
+        for trackIndex in project.timeline.tracks.indices {
+            if let clipIndex = project.timeline.tracks[trackIndex].clips
+                .firstIndex(where: { $0.id == id }) {
+                project.timeline.tracks[trackIndex].clips[clipIndex].transitionToNext = transition
+                break
+            }
+        }
+        Task { await reloadComposition() }
+    }
+
+    /// Returns the clip that immediately follows `id` on the same track,
+    /// if any. Used by the inspector to decide whether the Transition
+    /// section is meaningful (transitions only render between adjacent
+    /// clips on the same track).
+    func nextClip(on track: Track.ID, after id: Clip.ID) -> Clip? {
+        guard let track = project.timeline.tracks.first(where: { $0.id == track }) else { return nil }
+        let sorted = track.clips.sorted { $0.timeRange.start < $1.timeRange.start }
+        guard let idx = sorted.firstIndex(where: { $0.id == id }) else { return nil }
+        let next = idx + 1
+        return next < sorted.count ? sorted[next] : nil
+    }
+
+    /// Convenience that finds the track and following clip for the given
+    /// clip ID. Returns nil if the clip is the last on its track.
+    func clipFollowing(_ id: Clip.ID) -> Clip? {
+        for track in project.timeline.tracks {
+            let sorted = track.clips.sorted { $0.timeRange.start < $1.timeRange.start }
+            if let idx = sorted.firstIndex(where: { $0.id == id }) {
+                let next = idx + 1
+                return next < sorted.count ? sorted[next] : nil
+            }
+        }
+        return nil
+    }
+
     // MARK: - Markers
 
     /// Drop a marker at the current playhead. Auto-numbers the label

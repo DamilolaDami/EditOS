@@ -49,6 +49,12 @@ struct Clip: Identifiable, Hashable, Sendable, Codable {
     /// `multiplier` is the playback rate at that time (e.g. 2.0 = 2×).
     /// Between keyframes the rate interpolates linearly.
     var speedKeyframes: [SpeedKeyframe]? = nil
+    /// Transition between this clip and the next on the same track.
+    /// `nil` means the clips abut with a hard cut. When set, the
+    /// composition pipeline overlaps the next clip's leading edge with
+    /// this clip's trailing edge by `transitionToNext.duration` seconds
+    /// and blends per `transitionToNext.kind`.
+    var transitionToNext: Transition? = nil
 
     init(
         id: UUID = UUID(),
