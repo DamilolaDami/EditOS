@@ -15,6 +15,27 @@
              https://sparkle-project.org/documentation/publishing/ -->
 
         <item>
+            <title>EditOS 1.2</title>
+            <pubDate>Sun, 17 May 2026 00:00:00 +0000</pubDate>
+            <sparkle:version>3</sparkle:version>
+            <sparkle:shortVersionString>1.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[
+                <p>Volume keyframes / gain envelope on clips, animated
+                text presets (typewriter, fade-in word, slide, pop-bounce,
+                scale-up), title-card generator with six curated
+                templates, and a stereo audio meter in the preview
+                transport. See
+                <a href="https://github.com/DamilolaDami/EditOS/releases/tag/v1.2.0">v1.2.0 release notes</a>.</p>
+            ]]></description>
+            <enclosure
+                url="https://github.com/DamilolaDami/EditOS/releases/download/v1.2.0/EditOS-1.2.dmg"
+                sparkle:edSignature="pZuQgcsq5xYLB8tRzHGcQTEmkD26fOZcaOrSsWDe/UDu+gkkBHv231DrT98ize67I1oUzqeHIjyuT0bINW0jAQ=="
+                length="5652278"
+                type="application/octet-stream" />
+        </item>
+
+        <item>
             <title>EditOS 1.1</title>
             <pubDate>Fri, 16 May 2026 20:10:00 +0000</pubDate>
             <sparkle:version>2</sparkle:version>
