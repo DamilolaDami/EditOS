@@ -37,45 +37,48 @@ struct TimelineMarkerStrip: View {
                 .frame(width: stripWidth, height: Self.height)
                 .allowsHitTesting(false)
 
+            // Each pin is positioned via `alignmentGuide(.leading)` — a
+            // proper layout shift, not `.offset` or `.position`. The pin
+            // occupies *only* its own intrinsic width at the right x.
+            // Crucially, this avoids the previous bug where each ForEach
+            // row was a full-width HStack: the topmost row's Spacer
+            // covered the entire strip and silently blocked clicks on
+            // every pin below it.
             ForEach(model.project.timeline.markers) { marker in
                 let liveTime = dragTimes[marker.id] ?? marker.time
-                HStack(spacing: 0) {
-                    Spacer()
-                        .frame(width: max(0, CGFloat(liveTime) * pixelsPerSecond))
-                        .allowsHitTesting(false)
-                    MarkerPin(
-                        marker: marker,
-                        isRenaming: renamingID == marker.id,
-                        draftName: $draftName,
-                        renameFocused: $renameFocused,
-                        pixelsPerSecond: pixelsPerSecond,
-                        onSeek: { model.playback.seek(to: marker.time) },
-                        onDragChanged: { delta in
-                            let proposed = max(0, min(duration, marker.time + delta))
-                            dragTimes[marker.id] = proposed
-                        },
-                        onDragEnded: {
-                            if let proposed = dragTimes[marker.id] {
-                                model.moveMarker(marker.id, to: proposed)
-                            }
-                            dragTimes.removeValue(forKey: marker.id)
-                        },
-                        onBeginRename: {
-                            renamingID = marker.id
-                            draftName = marker.label
-                            DispatchQueue.main.async { renameFocused = true }
-                        },
-                        onCommitRename: { commitRename() },
-                        onCancelRename: { renamingID = nil },
-                        onChooseColor: { color in
-                            model.setMarkerColor(marker.id, color: color)
-                        },
-                        onDelete: { model.deleteMarker(marker.id) }
-                    )
-                    Spacer(minLength: 0)
-                        .allowsHitTesting(false)
+                MarkerPin(
+                    marker: marker,
+                    isRenaming: renamingID == marker.id,
+                    draftName: $draftName,
+                    renameFocused: $renameFocused,
+                    pixelsPerSecond: pixelsPerSecond,
+                    onSeek: { model.playback.seek(to: marker.time) },
+                    onDragChanged: { delta in
+                        let proposed = max(0, min(duration, marker.time + delta))
+                        dragTimes[marker.id] = proposed
+                    },
+                    onDragEnded: {
+                        if let proposed = dragTimes[marker.id] {
+                            model.moveMarker(marker.id, to: proposed)
+                        }
+                        dragTimes.removeValue(forKey: marker.id)
+                    },
+                    onBeginRename: {
+                        renamingID = marker.id
+                        draftName = marker.label
+                        DispatchQueue.main.async { renameFocused = true }
+                    },
+                    onCommitRename: { commitRename() },
+                    onCancelRename: { renamingID = nil },
+                    onChooseColor: { color in
+                        model.setMarkerColor(marker.id, color: color)
+                    },
+                    onDelete: { model.deleteMarker(marker.id) }
+                )
+                .alignmentGuide(.leading) { _ in
+                    -CGFloat(liveTime) * pixelsPerSecond
                 }
-                .frame(width: stripWidth, height: Self.height, alignment: .topLeading)
+                .alignmentGuide(.top) { _ in 0 }
             }
         }
         .frame(width: stripWidth, height: Self.height, alignment: .topLeading)
