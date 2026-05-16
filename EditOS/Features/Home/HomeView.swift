@@ -1,3 +1,4 @@
+import Sparkle
 import SwiftUI
 
 struct HomeView: View {
