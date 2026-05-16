@@ -157,6 +157,36 @@ private struct ClipInspector: View {
                 isMuted: (currentClip(clip.id)?.volume ?? clip.volume) == 0,
                 onToggle: { model.toggleClipMuted(clip.id) }
             )
+
+            // Gain envelope editor. Click to drop a keyframe, drag the
+            // diamond to retime/regain, right-click to remove.
+            let liveClip = currentClip(clip.id) ?? clip
+            let hasEnvelope = (liveClip.volumeKeyframes?.isEmpty == false)
+
+            HStack(spacing: 6) {
+                Text(hasEnvelope ? "Gain Envelope" : "Add Gain Envelope")
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(0.6)
+                    .foregroundStyle(theme.colors.textTertiary)
+                Spacer()
+                if hasEnvelope {
+                    Button("Clear") {
+                        model.setVolumeKeyframes(nil, on: clip.id)
+                    }
+                    .font(.system(size: 10, weight: .medium))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(theme.colors.danger)
+                }
+            }
+
+            VolumeEnvelopeView(model: model, clip: liveClip)
+
+            Text(hasEnvelope
+                 ? "Tap to add a keyframe · drag diamonds to adjust · right-click to delete."
+                 : "Tap anywhere on the strip to drop your first keyframe.")
+                .font(.system(size: 10))
+                .foregroundStyle(theme.colors.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

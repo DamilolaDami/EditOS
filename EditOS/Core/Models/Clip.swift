@@ -55,6 +55,14 @@ struct Clip: Identifiable, Hashable, Sendable, Codable {
     /// this clip's trailing edge by `transitionToNext.duration` seconds
     /// and blends per `transitionToNext.kind`.
     var transitionToNext: Transition? = nil
+    /// Optional gain envelope. When set, audio playback follows the
+    /// piecewise-linear curve between keyframes instead of the scalar
+    /// `volume`. Keyframe times are in source-clip-local seconds
+    /// (0…sourceRange.duration); `gain` is 0…2 (1 = unity, 2 = +6 dB).
+    /// Between keyframes the gain interpolates linearly — AVFoundation's
+    /// `setVolumeRamp(fromStartVolume:toEndVolume:timeRange:)` ramps each
+    /// segment natively.
+    var volumeKeyframes: [VolumeKeyframe]? = nil
 
     init(
         id: UUID = UUID(),
@@ -170,6 +178,55 @@ extension Clip {
             result = [
                 SpeedKeyframe(time: 0, multiplier: 1.0),
                 SpeedKeyframe(time: sourceDuration, multiplier: 1.0)
+            ]
+        }
+        return result
+    }
+}
+
+/// One control point in a clip's gain envelope.
+/// `time` is measured in source-clip-local seconds (0 to
+/// sourceRange.duration); `gain` is 0…2 (1.0 = unity, 0 = mute,
+/// 2.0 ≈ +6 dB). The composition pipeline emits a `setVolumeRamp`
+/// between every adjacent pair of keyframes so audio fades smoothly
+/// between control points.
+struct VolumeKeyframe: Hashable, Sendable, Codable, Identifiable {
+    let id: UUID
+    var time: TimeInterval
+    var gain: Double
+
+    init(id: UUID = UUID(), time: TimeInterval, gain: Double) {
+        self.id = id
+        self.time = max(0, time)
+        // Clamp so a misclick in the UI can't drive AVFoundation into
+        // negative-gain territory or absurd boosts that clip.
+        self.gain = max(0, min(2.0, gain))
+    }
+}
+
+extension Clip {
+    /// Returns the keyframe list with synthetic endpoints clamped to
+    /// `[0, sourceDuration]` so callers (composition pipeline, UI)
+    /// always see a complete domain. Each end-anchor inherits the
+    /// nearest user-placed keyframe's gain so the envelope is flat
+    /// (no surprise dip) outside the placed control points.
+    static func anchoredVolumeKeyframes(
+        _ keyframes: [VolumeKeyframe],
+        sourceDuration: TimeInterval
+    ) -> [VolumeKeyframe] {
+        let sorted = keyframes.sorted { $0.time < $1.time }
+        var result: [VolumeKeyframe] = []
+        if let first = sorted.first, first.time > 0.001 {
+            result.append(VolumeKeyframe(time: 0, gain: first.gain))
+        }
+        result.append(contentsOf: sorted.filter { $0.time >= 0 && $0.time <= sourceDuration })
+        if let last = result.last, last.time < sourceDuration - 0.001 {
+            result.append(VolumeKeyframe(time: sourceDuration, gain: last.gain))
+        }
+        if result.isEmpty {
+            result = [
+                VolumeKeyframe(time: 0, gain: 1.0),
+                VolumeKeyframe(time: sourceDuration, gain: 1.0)
             ]
         }
         return result

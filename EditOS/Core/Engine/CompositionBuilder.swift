@@ -864,7 +864,37 @@ struct CompositionBuilder: Sendable {
             }
             if let audioTrack {
                 let params = AVMutableAudioMixInputParameters(track: audioTrack)
-                params.setVolume(clip.volume, at: .zero)
+                // When the clip has a gain envelope, emit a setVolumeRamp
+                // per adjacent keyframe pair so AVFoundation interpolates
+                // smoothly between them on playback / export. The ramps
+                // are in *composition* time (clip.timeRange.start +
+                // keyframe.time), since the audioMix lives on the
+                // composition timeline. Falls back to the scalar volume
+                // when no envelope is set so existing clips behave
+                // identically.
+                if let keyframes = clip.volumeKeyframes, !keyframes.isEmpty {
+                    let anchored = Clip.anchoredVolumeKeyframes(
+                        keyframes,
+                        sourceDuration: clip.sourceRange.duration
+                    )
+                    for (a, b) in zip(anchored, anchored.dropFirst()) {
+                        let startTime = CMTime(
+                            seconds: clip.timeRange.start + a.time,
+                            preferredTimescale: 600
+                        )
+                        let endTime = CMTime(
+                            seconds: clip.timeRange.start + b.time,
+                            preferredTimescale: 600
+                        )
+                        params.setVolumeRamp(
+                            fromStartVolume: Float(a.gain) * clip.volume,
+                            toEndVolume: Float(b.gain) * clip.volume,
+                            timeRange: CMTimeRange(start: startTime, end: endTime)
+                        )
+                    }
+                } else {
+                    params.setVolume(clip.volume, at: .zero)
+                }
                 audioParams.append(params)
             }
         }

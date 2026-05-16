@@ -539,6 +539,89 @@ final class EditorViewModel {
         return nil
     }
 
+    // MARK: - Volume keyframes
+
+    /// Replace a clip's gain envelope. Pass `nil` to clear (clip reverts
+    /// to its scalar `volume`). Snapshots for undo + reloads composition
+    /// so the player picks up the new ramps.
+    func setVolumeKeyframes(_ keyframes: [VolumeKeyframe]?, on id: Clip.ID) {
+        recordSnapshot()
+        for trackIndex in project.timeline.tracks.indices {
+            if let clipIndex = project.timeline.tracks[trackIndex].clips
+                .firstIndex(where: { $0.id == id }) {
+                project.timeline.tracks[trackIndex].clips[clipIndex].volumeKeyframes
+                    = (keyframes?.isEmpty == false) ? keyframes : nil
+                break
+            }
+        }
+        Task { await reloadComposition() }
+    }
+
+    /// Drop a single keyframe at `localTime` (source-clip-local seconds).
+    /// Used by the inspector's tap-to-add-keyframe gesture. `gain`
+    /// defaults to whatever the envelope already interpolates to at
+    /// that time, so adding a keyframe doesn't visibly change the
+    /// envelope until the user drags it.
+    func addVolumeKeyframe(_ time: TimeInterval, gain: Double, on id: Clip.ID) {
+        recordSnapshot()
+        for trackIndex in project.timeline.tracks.indices {
+            if let clipIndex = project.timeline.tracks[trackIndex].clips
+                .firstIndex(where: { $0.id == id }) {
+                var existing = project.timeline.tracks[trackIndex].clips[clipIndex].volumeKeyframes ?? []
+                existing.append(VolumeKeyframe(time: time, gain: gain))
+                project.timeline.tracks[trackIndex].clips[clipIndex].volumeKeyframes
+                    = existing.sorted { $0.time < $1.time }
+                break
+            }
+        }
+        Task { await reloadComposition() }
+    }
+
+    /// Mutate an existing keyframe. Used by the drag-handle gestures on
+    /// the gain-envelope strip.
+    func updateVolumeKeyframe(
+        _ keyframeID: VolumeKeyframe.ID,
+        on id: Clip.ID,
+        time: TimeInterval? = nil,
+        gain: Double? = nil
+    ) {
+        recordSnapshot()
+        for trackIndex in project.timeline.tracks.indices {
+            if let clipIndex = project.timeline.tracks[trackIndex].clips
+                .firstIndex(where: { $0.id == id }) {
+                guard var keyframes = project.timeline.tracks[trackIndex].clips[clipIndex].volumeKeyframes,
+                      let kfIndex = keyframes.firstIndex(where: { $0.id == keyframeID })
+                else { return }
+                let original = keyframes[kfIndex]
+                keyframes[kfIndex] = VolumeKeyframe(
+                    id: original.id,
+                    time: time ?? original.time,
+                    gain: gain ?? original.gain
+                )
+                project.timeline.tracks[trackIndex].clips[clipIndex].volumeKeyframes
+                    = keyframes.sorted { $0.time < $1.time }
+                break
+            }
+        }
+        Task { await reloadComposition() }
+    }
+
+    func removeVolumeKeyframe(_ keyframeID: VolumeKeyframe.ID, on id: Clip.ID) {
+        recordSnapshot()
+        for trackIndex in project.timeline.tracks.indices {
+            if let clipIndex = project.timeline.tracks[trackIndex].clips
+                .firstIndex(where: { $0.id == id }) {
+                project.timeline.tracks[trackIndex].clips[clipIndex].volumeKeyframes?
+                    .removeAll { $0.id == keyframeID }
+                if project.timeline.tracks[trackIndex].clips[clipIndex].volumeKeyframes?.isEmpty == true {
+                    project.timeline.tracks[trackIndex].clips[clipIndex].volumeKeyframes = nil
+                }
+                break
+            }
+        }
+        Task { await reloadComposition() }
+    }
+
     // MARK: - Transitions
 
     /// Set the outgoing transition for a clip. Pass `nil` to clear it
