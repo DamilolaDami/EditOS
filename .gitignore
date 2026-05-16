@@ -27,3 +27,6 @@ Package.resolved
 # the same directory and adds it to the Xcode target.
 EditOS/Resources/Secrets.plist
 Secrets.plist
+
+# Release outputs from scripts/release.sh — archives, signed apps, DMGs.
+dist/

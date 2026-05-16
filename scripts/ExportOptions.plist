@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Distribution outside the Mac App Store, signed with a
+         Developer ID Application certificate. -->
+    <key>method</key>
+    <string>developer-id</string>
+
+    <key>destination</key>
+    <string>export</string>
+
+    <!-- "automatic" lets Xcode pick the right Developer ID Application
+         identity from your keychain. Override `teamID` so it doesn't
+         pick a stale identity from a different team. -->
+    <key>signingStyle</key>
+    <string>automatic</string>
+
+    <key>teamID</key>
+    <string>6MBTU33NGM</string>
+
+    <!-- Strip Swift libraries from the bundle (smaller download). The
+         libs still ship with macOS so removing the bundled copies is
+         fine. -->
+    <key>stripSwiftSymbols</key>
+    <true/>
+</dict>
+</plist>
