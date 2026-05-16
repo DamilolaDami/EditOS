@@ -28,6 +28,15 @@ final class EditorViewModel {
     var hasClipboard: Bool { !clipboard.isEmpty }
 
     let playback: PlaybackEngine
+    let voiceoverRecorder: VoiceoverRecorder = VoiceoverRecorder()
+    let captionTranscriber: CaptionTranscriber = CaptionTranscriber()
+    /// Set while an auto-caption pass is running for a given clip — lets the
+    /// inspector show a progress hint and disable the button to prevent
+    /// re-entry on the same clip.
+    var transcribingClipID: Clip.ID? = nil
+    /// Last user-visible error from a caption pass. Cleared automatically
+    /// after the next successful run.
+    var lastCaptionError: String? = nil
     private let resolver: AssetResolver
 
     // MARK: - Undo / Redo
@@ -436,6 +445,100 @@ final class EditorViewModel {
         await reloadComposition()
     }
 
+    // MARK: - Voiceover
+
+    /// Begin recording the user's voice. Throws if AVAudioRecorder can't
+    /// start (typically a missing microphone permission).
+    func startVoiceoverRecording() throws {
+        _ = try voiceoverRecorder.start()
+        // Pause playback so the recording mic isn't picking up the speakers.
+        playback.pause()
+    }
+
+    /// Stop the active recording and drop the resulting AAC file on the
+    /// audio track at the playhead as a voiceover-flagged clip. Existing
+    /// music gets audio-ducked automatically (see CompositionBuilder).
+    func stopVoiceoverRecording() async {
+        guard let url = voiceoverRecorder.stop() else { return }
+        let importer = MediaImporter()
+        do {
+            let asset = try await importer.makeAsset(from: url)
+            recordSnapshot()
+            placeAsset(asset, atTime: playback.currentTime)
+            // Flag the most recent audio-track clip referencing this asset
+            // as a voiceover so audio ducking knows to dim other music
+            // tracks during its time range.
+            if let trackIndex = project.timeline.tracks.firstIndex(where: { $0.kind == .audio }) {
+                if let clipIndex = project.timeline.tracks[trackIndex].clips
+                    .lastIndex(where: { $0.assetID == asset.id }) {
+                    project.timeline.tracks[trackIndex].clips[clipIndex].isVoiceover = true
+                }
+            }
+            await reloadComposition()
+        } catch {
+            // Recording is on disk; user can re-import via Media tab if
+            // needed.
+        }
+    }
+
+    func cancelVoiceoverRecording() {
+        voiceoverRecorder.cancel()
+    }
+
+    // MARK: - Auto-captions
+
+    /// Run SFSpeechRecognizer over `clip`'s underlying audio (or video) asset
+    /// and drop one caption-track text overlay per recognised phrase. The
+    /// clip's `timeRange.start` and `sourceRange.start` are used to map the
+    /// recogniser's timestamps back into project time, so partially-trimmed
+    /// clips still line up.
+    func generateCaptions(for clipID: Clip.ID) async {
+        guard transcribingClipID == nil else { return }
+        guard let location = locateClip(clipID) else { return }
+        let clip = project.timeline.tracks[location.trackIndex].clips[location.clipIndex]
+        guard let asset = project.assets.first(where: { $0.id == clip.assetID }) else { return }
+        guard asset.kind == .audio || asset.kind == .video else { return }
+
+        transcribingClipID = clipID
+        defer { transcribingClipID = nil }
+        do {
+            let url = try await resolver.resolve(asset)
+            let segments = try await captionTranscriber.transcribe(audioURL: url)
+            lastCaptionError = nil
+            recordSnapshot()
+            for segment in segments {
+                // Skip segments that fall outside the clip's visible range
+                // (sourceRange) — e.g. a long file trimmed to its middle.
+                let inClipStart = segment.start - clip.sourceRange.start
+                let inClipEnd = inClipStart + segment.duration
+                guard inClipEnd > 0, inClipStart < clip.timeRange.duration else { continue }
+                let clampedStart = max(0, inClipStart)
+                let clampedEnd = min(clip.timeRange.duration, inClipEnd)
+                let projectStart = clip.timeRange.start + clampedStart
+                let projectDuration = max(0.4, clampedEnd - clampedStart)
+                placeText(segment.text, atTime: projectStart, duration: projectDuration)
+            }
+        } catch let error as CaptionTranscriber.TranscribeError {
+            lastCaptionError = error.errorDescription
+        } catch {
+            lastCaptionError = error.localizedDescription
+        }
+    }
+
+    private struct ClipLocation {
+        let trackIndex: Int
+        let clipIndex: Int
+    }
+
+    private func locateClip(_ id: Clip.ID) -> ClipLocation? {
+        for (trackIndex, track) in project.timeline.tracks.enumerated() {
+            if let clipIndex = track.clips.firstIndex(where: { $0.id == id }) {
+                return ClipLocation(trackIndex: trackIndex, clipIndex: clipIndex)
+            }
+        }
+        return nil
+    }
+
     /// Reveal an asset's source file in Finder.
     func revealAssetInFinder(_ id: MediaAsset.ID) {
         guard let asset = project.assets.first(where: { $0.id == id }) else { return }
@@ -511,67 +614,146 @@ final class EditorViewModel {
         Task { await reloadComposition() }
     }
 
-    /// Move a clip horizontally along its track. Clamped between the previous
-    /// clip's end (or 0) and the next clip's start minus this clip's duration,
-    /// so reposition can't overlap neighbors. After moving, clips on the track
-    /// are re-sorted by start time so adjacency math stays consistent.
+    // MARK: - Speed ramping
+
+    /// Replace the clip's speed-ramp curve. Recomputes the clip's
+    /// effective display duration and ripple-pushes following clips on
+    /// the same track to keep adjacency intact. Pass `nil` to clear the
+    /// ramp and fall back to the scalar `speed`.
+    func setSpeedKeyframes(_ keyframes: [SpeedKeyframe]?, on id: Clip.ID) {
+        recordSnapshot()
+        guard let location = locateClipForSpeedRamp(id) else { return }
+        var clip = project.timeline.tracks[location.trackIndex].clips[location.clipIndex]
+        clip.speedKeyframes = (keyframes?.isEmpty == false) ? keyframes : nil
+        let newDuration = clip.effectiveDisplayDuration()
+        let oldDuration = clip.timeRange.duration
+        let delta = newDuration - oldDuration
+        clip.timeRange = TimeRange(start: clip.timeRange.start, duration: newDuration)
+        project.timeline.tracks[location.trackIndex].clips[location.clipIndex] = clip
+
+        // Ripple-push subsequent clips on the same track so trailing
+        // neighbours don't suddenly overlap (or leave a gap) when the
+        // user changes the speed curve.
+        if abs(delta) > 0.001 {
+            for i in (location.clipIndex + 1)..<project.timeline.tracks[location.trackIndex].clips.count {
+                let other = project.timeline.tracks[location.trackIndex].clips[i]
+                project.timeline.tracks[location.trackIndex].clips[i].timeRange = TimeRange(
+                    start: max(0, other.timeRange.start + delta),
+                    duration: other.timeRange.duration
+                )
+            }
+        }
+        Task { await reloadComposition() }
+    }
+
+    /// Apply one of the canned speed-ramp curves. Convenience that wraps
+    /// `setSpeedKeyframes` with a preset's keyframe list.
+    func applySpeedPreset(_ preset: SpeedRampPreset, on id: Clip.ID) {
+        guard let location = locateClipForSpeedRamp(id) else { return }
+        let clip = project.timeline.tracks[location.trackIndex].clips[location.clipIndex]
+        let keyframes = preset.keyframes(forSourceDuration: clip.sourceRange.duration)
+        setSpeedKeyframes(keyframes, on: id)
+    }
+
+    private struct ClipPosition {
+        let trackIndex: Int
+        let clipIndex: Int
+    }
+
+    private func locateClipForSpeedRamp(_ id: Clip.ID) -> ClipPosition? {
+        for (trackIndex, track) in project.timeline.tracks.enumerated() {
+            if let clipIndex = track.clips.firstIndex(where: { $0.id == id }) {
+                return ClipPosition(trackIndex: trackIndex, clipIndex: clipIndex)
+            }
+        }
+        return nil
+    }
+
+    /// Move a clip horizontally along its track. CapCut-style:
+    ///   1. The dragged clip is lifted off the track temporarily.
+    ///   2. We compute its target start (with snapping against the rest of
+    ///      the timeline and the playhead).
+    ///   3. If the target start falls *inside* another clip's range, we
+    ///      clamp to that clip's nearest free edge instead of overlapping.
+    ///   4. Any clips after the new placement that would now overlap get
+    ///      ripple-pushed forward together so the drop point makes room —
+    ///      so you can move a clip into a gap between split halves even
+    ///      when the gap is narrower than the clip.
     func moveClip(_ id: Clip.ID, toStart newStart: TimeInterval) {
         recordSnapshot()
         for trackIndex in project.timeline.tracks.indices {
             guard let clipIndex = project.timeline.tracks[trackIndex].clips.firstIndex(where: { $0.id == id }) else {
                 continue
             }
-            var clip = project.timeline.tracks[trackIndex].clips[clipIndex]
-            let duration = clip.timeRange.duration
-            let clips = project.timeline.tracks[trackIndex].clips
-            let lowerBound: TimeInterval = clipIndex > 0 ? clips[clipIndex - 1].timeRange.end : 0
-            let upperBound: TimeInterval = clipIndex + 1 < clips.count
-                ? max(lowerBound, clips[clipIndex + 1].timeRange.start - duration)
-                : .greatestFiniteMagnitude
-            var clamped = max(lowerBound, min(newStart, upperBound))
+            let originalClip = project.timeline.tracks[trackIndex].clips[clipIndex]
+            let duration = originalClip.timeRange.duration
 
-            // Snap to neighbour edges, the timeline origin, the playhead,
-            // *and* the edges of every clip in every other track — so the
-            // dragged clip can align vertically with content on a different
-            // lane the same way it aligns horizontally with its own
-            // neighbours. Skipped entirely when snap is toggled off.
+            // Lift the dragged clip off this track.
+            var others = project.timeline.tracks[trackIndex].clips
+            others.remove(at: clipIndex)
+            others.sort { $0.timeRange.start < $1.timeRange.start }
+
+            var candidate = max(0, newStart)
+
+            // Snap to anchors: timeline origin, playhead, and the start/end
+            // of every clip on every other track (so vertical alignment
+            // across lanes still works). Skipped entirely when snap is off.
             if snapEnabled {
                 let snapTolerance: TimeInterval = 0.08
-
-                // Interesting times: timeline 0, playhead, every other
-                // clip's start/end across all tracks (including same-track
-                // neighbours, which are already covered by lowerBound /
-                // upperBound but harmless to include here).
-                var interestingPoints: [TimeInterval] = [0, lowerBound]
-                if upperBound.isFinite { interestingPoints.append(upperBound) }
-                interestingPoints.append(playback.currentTime)
+                var snapPoints: [TimeInterval] = [0, playback.currentTime]
                 for laneTrack in project.timeline.tracks {
-                    for other in laneTrack.clips where other.id != id {
-                        interestingPoints.append(other.timeRange.start)
-                        interestingPoints.append(other.timeRange.end)
+                    for clip in laneTrack.clips where clip.id != id {
+                        snapPoints.append(clip.timeRange.start)
+                        snapPoints.append(clip.timeRange.end)
                     }
                 }
-
-                // Each interesting point yields two candidate placements:
-                // align our leading edge to it, or align our trailing edge
-                // to it (which means new start = point − duration).
                 var snapTargets: [TimeInterval] = []
-                for point in interestingPoints {
+                for point in snapPoints {
                     snapTargets.append(point)
                     snapTargets.append(point - duration)
                 }
-
                 if let best = snapTargets
-                    .filter({ $0 >= lowerBound && $0 <= upperBound })
-                    .min(by: { abs($0 - clamped) < abs($1 - clamped) }),
-                   abs(best - clamped) <= snapTolerance {
-                    clamped = best
+                    .filter({ $0 >= 0 })
+                    .min(by: { abs($0 - candidate) < abs($1 - candidate) }),
+                   abs(best - candidate) <= snapTolerance {
+                    candidate = best
                 }
             }
 
-            clip.timeRange = TimeRange(start: clamped, duration: duration)
-            project.timeline.tracks[trackIndex].clips[clipIndex] = clip
-            project.timeline.tracks[trackIndex].clips.sort { $0.timeRange.start < $1.timeRange.start }
+            // Where in chronological order does this drop fit? Use the
+            // dragged clip's *centre* so a drop just past a clip's midpoint
+            // is treated as "after that clip" — the CapCut feel users
+            // expect.
+            let dropCentre = candidate + duration / 2
+            let insertIndex = others.firstIndex(where: { $0.timeRange.midpoint > dropCentre })
+                ?? others.count
+
+            // The dragged clip can't start before the previous neighbour's
+            // end — that side is the hard wall. (Overlap with the *next*
+            // neighbour is resolved by ripple-pushing it forward below.)
+            let previousEnd: TimeInterval = (insertIndex > 0) ? others[insertIndex - 1].timeRange.end : 0
+            let effectiveStart = max(previousEnd, candidate)
+            let effectiveEnd = effectiveStart + duration
+
+            // Ripple: if the dragged clip would overlap the clip at
+            // `insertIndex` (or any after), push the whole subsequent run
+            // forward in lock-step so they stay adjacent to each other.
+            if insertIndex < others.count, others[insertIndex].timeRange.start < effectiveEnd {
+                let push = effectiveEnd - others[insertIndex].timeRange.start
+                for i in insertIndex..<others.count {
+                    let c = others[i]
+                    others[i].timeRange = TimeRange(
+                        start: c.timeRange.start + push,
+                        duration: c.timeRange.duration
+                    )
+                }
+            }
+
+            // Slot the dragged clip into its new home.
+            var movedClip = originalClip
+            movedClip.timeRange = TimeRange(start: effectiveStart, duration: duration)
+            others.insert(movedClip, at: insertIndex)
+            project.timeline.tracks[trackIndex].clips = others
             return
         }
     }

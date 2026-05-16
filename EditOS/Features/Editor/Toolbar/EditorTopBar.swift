@@ -8,10 +8,19 @@ struct EditorTopBar: View {
     @Environment(\.theme) private var theme
     @Environment(AppEnvironment.self) private var environment
     @Bindable var model: EditorViewModel
-    @State private var isExportSheetPresented: Bool = false
+    /// A fresh token per Export click. Using `.sheet(item:)` keyed off this
+    /// token forces SwiftUI to build a brand-new `ExportSheet` each time
+    /// the user hits Export — otherwise leftover `@State` from a previous
+    /// run (e.g. a `.finished` phase) can keep the configure form hidden
+    /// or show stale content until the user nudges the timeline.
+    @State private var exportToken: ExportToken?
     @State private var isRenamingProject: Bool = false
     @State private var draftProjectName: String = ""
     @FocusState private var renameFocused: Bool
+
+    struct ExportToken: Identifiable {
+        let id = UUID()
+    }
     /// Distance reserved on the leading edge so the macOS traffic lights
     /// (close / minimize / zoom) sit cleanly without overlapping content.
     private let trafficLightInset: CGFloat = 78
@@ -19,7 +28,7 @@ struct EditorTopBar: View {
 
     var body: some View {
         baseLayout
-            .sheet(isPresented: $isExportSheetPresented) {
+            .sheet(item: $exportToken) { _ in
                 ExportSheet(model: model)
             }
     }
@@ -194,7 +203,7 @@ struct EditorTopBar: View {
 
     private var exportButton: some View {
         Button {
-            isExportSheetPresented = true
+            exportToken = ExportToken()
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "square.and.arrow.up.fill")

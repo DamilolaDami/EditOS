@@ -16,6 +16,7 @@ final class AppEnvironment {
     let giphyService: GiphyService
     let freesoundService: FreesoundService
     let exportEngine: ExportEngine
+    let cloudKitSyncMonitor: CloudKitSyncMonitor
 
     /// Container used to build the SwiftData-backed ProjectStore when one
     /// isn't supplied. Wired from `EditOSApp` at startup.
@@ -38,5 +39,9 @@ final class AppEnvironment {
         self.giphyService = giphyService
         self.freesoundService = freesoundService
         self.exportEngine = exportEngine
+        // Built inline rather than as a default-parameter expression: the
+        // monitor's init is `@MainActor`, so it can't be evaluated in the
+        // caller's isolation context.
+        self.cloudKitSyncMonitor = CloudKitSyncMonitor()
     }
 }

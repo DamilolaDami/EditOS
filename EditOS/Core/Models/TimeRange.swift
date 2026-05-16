@@ -8,6 +8,7 @@ struct TimeRange: Hashable, Sendable, Codable {
     var duration: TimeInterval
 
     var end: TimeInterval { start + duration }
+    var midpoint: TimeInterval { start + duration / 2 }
 
     static let zero = TimeRange(start: 0, duration: 0)
 

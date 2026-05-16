@@ -354,30 +354,16 @@ private struct OverlayItem: View {
     }
 }
 
-/// Loads a GIF / PNG / WebP sticker from disk once per path change and
-/// renders the first decoded frame. Doing the load inside a `.task(id:)`
-/// keeps each render cheap when the playhead ticks. File-scope so both the
-/// preview canvas and the timeline cell can use the same cached view.
+/// Renders a sticker image from disk. GIFs animate via NSImageView's native
+/// frame ticking; static formats just show their single frame. File-scope so
+/// both the preview canvas and the timeline cell can share the view.
 struct StickerFileImage: View {
     let path: String
     let size: CGFloat
-    @State private var image: NSImage?
 
     var body: some View {
-        Group {
-            if let image {
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
-            } else {
-                Color.clear
-            }
-        }
-        .frame(width: max(8, size), height: max(8, size))
-        .task(id: path) {
-            image = NSImage(contentsOfFile: path)
-        }
+        AnimatedImage(url: URL(fileURLWithPath: path))
+            .frame(width: max(8, size), height: max(8, size))
     }
 }
 
@@ -424,6 +410,7 @@ private struct PreviewControls: View {
             TransportButton(systemImage: "forward.end.fill") {
                 model.playback.seek(to: model.playback.duration)
             }
+            voiceoverButton
             Spacer()
             Text("EditOS")
                 .font(theme.typography.caption)
@@ -432,6 +419,32 @@ private struct PreviewControls: View {
         }
         .padding(.horizontal, theme.spacing.md)
         .padding(.vertical, theme.spacing.sm)
+    }
+
+    /// Pulse-red mic button while recording, accent ghost otherwise. Tap
+    /// toggles AVAudioRecorder via the view model and drops the result as a
+    /// voiceover-flagged audio clip at the playhead on stop.
+    private var voiceoverButton: some View {
+        Button {
+            if model.voiceoverRecorder.isRecording {
+                Task { await model.stopVoiceoverRecording() }
+            } else {
+                try? model.startVoiceoverRecording()
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: model.voiceoverRecorder.isRecording ? "stop.circle.fill" : "mic.circle.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .symbolEffect(.pulse, options: .repeating, isActive: model.voiceoverRecorder.isRecording)
+            }
+            .foregroundStyle(
+                model.voiceoverRecorder.isRecording
+                ? theme.colors.danger
+                : theme.colors.textSecondary
+            )
+        }
+        .buttonStyle(.plain)
+        .help(model.voiceoverRecorder.isRecording ? "Stop voiceover" : "Record voiceover")
     }
 
     private func timeReadout(_ seconds: TimeInterval) -> Text {

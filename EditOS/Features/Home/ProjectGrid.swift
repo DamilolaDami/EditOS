@@ -4,24 +4,30 @@ import SwiftUI
 struct ProjectGrid: View {
     @Environment(\.theme) private var theme
     let projects: [Project]
+    @Binding var searchText: String
+    @Binding var sortOption: ProjectSortOption
     let onOpen: (Project) -> Void
 
     private let columns = [GridItem(.adaptive(minimum: 200, maximum: 240), spacing: 16)]
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacing.md) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .firstTextBaseline, spacing: theme.spacing.md) {
                 Text("Projects".uppercased())
                     .font(theme.typography.sectionLabel)
                     .foregroundStyle(theme.colors.textTertiary)
                     .tracking(0.8)
                 Spacer()
+                ProjectSearchField(text: $searchText)
+                    .frame(maxWidth: 220)
+                ProjectSortMenu(selection: $sortOption)
                 Text("\(projects.count) total")
                     .font(theme.typography.caption)
                     .foregroundStyle(theme.colors.textTertiary)
+                    .monospacedDigit()
             }
             if projects.isEmpty {
-                EmptyProjectsCard()
+                EmptyProjectsCard(isSearching: !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             } else {
                 LazyVGrid(columns: columns, spacing: theme.spacing.lg) {
                     ForEach(projects) { project in
@@ -30,6 +36,79 @@ struct ProjectGrid: View {
                 }
             }
         }
+    }
+}
+
+/// Slim inline text field for filtering the project grid. Renders a magnifying
+/// glass on the left and a clear-button when the user has typed something.
+private struct ProjectSearchField: View {
+    @Environment(\.theme) private var theme
+    @Binding var text: String
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(theme.colors.textTertiary)
+            TextField("Search projects", text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .focused($isFocused)
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.colors.textTertiary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(theme.colors.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(isFocused ? theme.colors.accent.opacity(0.6) : theme.colors.border, lineWidth: 1)
+        )
+    }
+}
+
+private struct ProjectSortMenu: View {
+    @Environment(\.theme) private var theme
+    @Binding var selection: ProjectSortOption
+
+    var body: some View {
+        Menu {
+            ForEach(ProjectSortOption.allCases) { option in
+                Button {
+                    selection = option
+                } label: {
+                    HStack {
+                        Text(option.label)
+                        if option == selection {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.up.arrow.down")
+                    .font(.system(size: 10, weight: .semibold))
+                Text(selection.label)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .foregroundStyle(theme.colors.textSecondary)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
     }
 }
 
@@ -252,16 +331,17 @@ struct ProjectCard: View {
 
 private struct EmptyProjectsCard: View {
     @Environment(\.theme) private var theme
+    let isSearching: Bool
 
     var body: some View {
         VStack(spacing: theme.spacing.md) {
-            Image(systemName: "film")
+            Image(systemName: isSearching ? "magnifyingglass" : "film")
                 .font(.system(size: 36, weight: .light))
                 .foregroundStyle(theme.colors.textTertiary)
-            Text("No projects yet")
+            Text(isSearching ? "No matches" : "No projects yet")
                 .font(theme.typography.title)
                 .foregroundStyle(theme.colors.textPrimary)
-            Text("Create one above to get started.")
+            Text(isSearching ? "Try a different search term." : "Create one above to get started.")
                 .font(theme.typography.body)
                 .foregroundStyle(theme.colors.textSecondary)
         }

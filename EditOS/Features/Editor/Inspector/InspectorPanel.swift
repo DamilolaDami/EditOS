@@ -117,7 +117,9 @@ private struct ClipInspector: View {
                 timingSection(showSpeed: false)
             case .media:
                 timingSection(showSpeed: true)
+                speedRampSection
                 audioSection
+                captionsSection
                 transformSection
             }
         }
@@ -154,6 +156,139 @@ private struct ClipInspector: View {
                 isMuted: (currentClip(clip.id)?.volume ?? clip.volume) == 0,
                 onToggle: { model.toggleClipMuted(clip.id) }
             )
+        }
+    }
+
+    /// Compact curve editor + preset menu for speed ramping. Available
+    /// only for media clips with a non-trivial source duration.
+    private var speedRampSection: some View {
+        let assetKind = model.project.assets.first(where: { $0.id == clip.assetID })?.kind
+        let canRamp = (assetKind == .video || assetKind == .audio)
+            && clip.sourceRange.duration > 0.2
+        return Group {
+            if canRamp {
+                InspectorSection(title: "Speed Ramp", systemImage: "speedometer") {
+                    let liveClip = currentClip(clip.id) ?? clip
+                    let keyframes = liveClip.speedKeyframes ?? []
+
+                    SpeedRampCurveView(
+                        keyframes: keyframes,
+                        sourceDuration: liveClip.sourceRange.duration,
+                        height: 56
+                    )
+
+                    HStack(spacing: 8) {
+                        Menu {
+                            ForEach(SpeedRampPreset.allCases) { preset in
+                                Button {
+                                    model.applySpeedPreset(preset, on: clip.id)
+                                } label: {
+                                    Label(preset.displayName, systemImage: preset.systemImage)
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "wand.and.stars")
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text("Presets")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(theme.colors.surface)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(theme.colors.border, lineWidth: 1)
+                        )
+
+                        Button {
+                            model.setSpeedKeyframes(nil, on: clip.id)
+                            reload()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.uturn.backward")
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text("Clear")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                        }
+                        .buttonStyle(.plain)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(theme.colors.surface)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(theme.colors.border, lineWidth: 1)
+                        )
+                        .disabled(keyframes.isEmpty)
+                        .opacity(keyframes.isEmpty ? 0.5 : 1.0)
+                    }
+
+                    if !keyframes.isEmpty {
+                        let effective = liveClip.effectiveDisplayDuration()
+                        Text(String(format: "Plays in %.2fs (source %.2fs)", effective, liveClip.sourceRange.duration))
+                            .font(.system(size: 10))
+                            .foregroundStyle(theme.colors.textTertiary)
+                    } else {
+                        Text("Pick a preset to vary playback rate across the clip.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(theme.colors.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+    }
+
+    private var captionsSection: some View {
+        let assetKind = model.project.assets.first(where: { $0.id == clip.assetID })?.kind
+        let supportsCaptions = assetKind == .audio || assetKind == .video
+        return Group {
+            if supportsCaptions {
+                InspectorSection(title: "Captions", systemImage: "captions.bubble") {
+                    let isTranscribing = model.transcribingClipID == clip.id
+                    Button {
+                        Task { await model.generateCaptions(for: clip.id) }
+                    } label: {
+                        HStack(spacing: 6) {
+                            if isTranscribing {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .scaleEffect(0.7)
+                            } else {
+                                Image(systemName: "wand.and.sparkles")
+                            }
+                            Text(isTranscribing ? "Transcribing…" : "Auto-Caption")
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(isTranscribing)
+
+                    if let message = model.lastCaptionError {
+                        Text(message)
+                            .font(.system(size: 11))
+                            .foregroundStyle(theme.colors.danger)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text("Drops a text overlay per phrase on the captions track.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
         }
     }
 

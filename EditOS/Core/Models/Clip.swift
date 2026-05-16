@@ -34,6 +34,21 @@ struct Clip: Identifiable, Hashable, Sendable, Codable {
     /// Filter strength in 0…1. Filters blend with the original at lower
     /// values so the user can dial in subtlety.
     var filterIntensity: Double?
+    /// Fade-in at the clip's leading edge — black → source.
+    var fadeIn: Bool = false
+    /// Fade-out at the clip's trailing edge — source → black.
+    var fadeOut: Bool = false
+    /// Duration in seconds for each fade (default 0.5s).
+    var fadeDuration: TimeInterval = 0.5
+    /// Marks audio clips recorded as voiceover. Drives audio ducking — any
+    /// non-voiceover music tracks dim during a voiceover clip's range.
+    var isVoiceover: Bool = false
+    /// Optional speed-ramp curve. When set, overrides the scalar `speed`
+    /// and varies playback rate piecewise across the clip's source range.
+    /// Keyframe times are in source-clip-local seconds (0…sourceRange.duration);
+    /// `multiplier` is the playback rate at that time (e.g. 2.0 = 2×).
+    /// Between keyframes the rate interpolates linearly.
+    var speedKeyframes: [SpeedKeyframe]? = nil
 
     init(
         id: UUID = UUID(),
@@ -86,6 +101,72 @@ extension Clip {
         if stickerSymbol != nil || stickerImagePath != nil { return .sticker }
         if filterPreset != nil { return .filter }
         return .media
+    }
+}
+
+/// One control point in a clip's speed ramp curve.
+/// `time` is measured in source-clip-local seconds (0 to sourceRange.duration);
+/// `multiplier` is the desired playback rate at that point. The
+/// CompositionBuilder samples this curve when slicing the source into
+/// piecewise `scaleTimeRange` segments.
+struct SpeedKeyframe: Hashable, Sendable, Codable {
+    var time: TimeInterval
+    var multiplier: Double
+
+    init(time: TimeInterval, multiplier: Double) {
+        self.time = max(0, time)
+        // Clamp to a sane range. Below 0.1× plays back as still-frame +
+        // duplicates frames; above 8× starts losing audio quality and
+        // is rarely useful in a consumer editor.
+        self.multiplier = max(0.1, min(8.0, multiplier))
+    }
+}
+
+extension Clip {
+    /// The display duration this clip *should* occupy on the timeline,
+    /// given its speed ramp (if any). When no ramp is set, falls back to
+    /// `sourceRange.duration / speed` (the scalar-speed behaviour).
+    /// Use this when ripple-pushing follow-on clips after the user edits
+    /// the speed curve.
+    func effectiveDisplayDuration() -> TimeInterval {
+        guard let keyframes = speedKeyframes, !keyframes.isEmpty else {
+            return sourceRange.duration / max(0.01, speed)
+        }
+        // Display duration is ∫(1/multiplier) ds across the source range.
+        // We approximate with trapezoidal integration over the sorted
+        // keyframe points anchored at 0 and sourceRange.duration.
+        let anchored = Self.anchoredKeyframes(keyframes, sourceDuration: sourceRange.duration)
+        var total: TimeInterval = 0
+        for i in 0..<(anchored.count - 1) {
+            let a = anchored[i]
+            let b = anchored[i + 1]
+            let segment = b.time - a.time
+            let avgInverseRate = (1.0 / a.multiplier + 1.0 / b.multiplier) / 2
+            total += segment * avgInverseRate
+        }
+        return total
+    }
+
+    /// Returns the keyframe list with synthetic endpoints clamped to
+    /// `[0, sourceDuration]` so the integration / segment-splitting math
+    /// always sees a complete domain.
+    static func anchoredKeyframes(_ keyframes: [SpeedKeyframe], sourceDuration: TimeInterval) -> [SpeedKeyframe] {
+        let sorted = keyframes.sorted { $0.time < $1.time }
+        var result: [SpeedKeyframe] = []
+        if let first = sorted.first, first.time > 0.001 {
+            result.append(SpeedKeyframe(time: 0, multiplier: first.multiplier))
+        }
+        result.append(contentsOf: sorted.filter { $0.time >= 0 && $0.time <= sourceDuration })
+        if let last = result.last, last.time < sourceDuration - 0.001 {
+            result.append(SpeedKeyframe(time: sourceDuration, multiplier: last.multiplier))
+        }
+        if result.isEmpty {
+            result = [
+                SpeedKeyframe(time: 0, multiplier: 1.0),
+                SpeedKeyframe(time: sourceDuration, multiplier: 1.0)
+            ]
+        }
+        return result
     }
 }
 
