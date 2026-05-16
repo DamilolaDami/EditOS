@@ -7,9 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		59D1DD162FB8E2F300248161 /* ExportOptions.plist in Resources */ = {isa = PBXBuildFile; fileRef = 59D1DD132FB8E2F300248161 /* ExportOptions.plist */; };
-		59D1DD172FB8E2F300248161 /* release.sh in Resources */ = {isa = PBXBuildFile; fileRef = 59D1DD142FB8E2F300248161 /* release.sh */; };
-		59D1DD1A2FB8E2FE00248161 /* ROADMAP.md in Resources */ = {isa = PBXBuildFile; fileRef = 59D1DD182FB8E2FE00248161 /* ROADMAP.md */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -253,9 +250,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				59D1DD1A2FB8E2FE00248161 /* ROADMAP.md in Resources */,
-				59D1DD162FB8E2F300248161 /* ExportOptions.plist in Resources */,
-				59D1DD172FB8E2F300248161 /* release.sh in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
