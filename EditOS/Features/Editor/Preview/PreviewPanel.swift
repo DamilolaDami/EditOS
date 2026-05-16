@@ -411,6 +411,9 @@ private struct PreviewControls: View {
                 model.playback.seek(to: model.playback.duration)
             }
             voiceoverButton
+            AudioMeter(playback: model.playback)
+                .frame(width: 14)
+                .padding(.leading, theme.spacing.xs)
             Spacer()
             Text("EditOS")
                 .font(theme.typography.caption)

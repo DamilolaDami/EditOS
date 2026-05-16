@@ -4,6 +4,7 @@ enum ToolCategory: String, Hashable, CaseIterable, Identifiable {
     case media
     case audio
     case text
+    case titles
     case stickers
     case effects
     case transitions
@@ -20,6 +21,7 @@ enum ToolCategory: String, Hashable, CaseIterable, Identifiable {
         case .media: "Media"
         case .audio: "Audio"
         case .text: "Text"
+        case .titles: "Titles"
         case .stickers: "Stickers"
         case .effects: "Effects"
         case .transitions: "Transitions"
@@ -36,6 +38,7 @@ enum ToolCategory: String, Hashable, CaseIterable, Identifiable {
         case .media: "film"
         case .audio: "waveform"
         case .text: "textformat"
+        case .titles: "text.append"
         case .stickers: "face.smiling"
         case .effects: "sparkles"
         case .transitions: "rectangle.righthalf.inset.filled.arrow.right"

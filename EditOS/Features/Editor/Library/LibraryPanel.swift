@@ -55,6 +55,8 @@ struct LibraryPanel: View {
             AudioLibrary(model: model)
         case .text:
             TextLibrary(model: model)
+        case .titles:
+            TitlesLibrary(model: model)
         case .stickers:
             StickerLibrary(model: model)
         case .captions:

@@ -63,6 +63,10 @@ struct Clip: Identifiable, Hashable, Sendable, Codable {
     /// `setVolumeRamp(fromStartVolume:toEndVolume:timeRange:)` ramps each
     /// segment natively.
     var volumeKeyframes: [VolumeKeyframe]? = nil
+    /// Optional kinetic-typography animation. Runs across the first
+    /// `textAnimation.duration` seconds of the clip's time range; the
+    /// text then stays static for the rest of the clip.
+    var textAnimation: TextAnimation? = nil
 
     init(
         id: UUID = UUID(),

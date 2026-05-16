@@ -224,6 +224,54 @@ final class EditorViewModel {
 
     // MARK: - Overlay clips (text / sticker)
 
+    /// Materialise a title template at `time`. Each layer in the template
+    /// becomes its own caption clip with the layer's animation,
+    /// position, colour, and font size; layers stagger by their
+    /// `startDelay` and all share the same end-time so they fade
+    /// together. Background fills are deferred to a future PR — V1
+    /// titles sit over whatever's underneath on the video track (or
+    /// the project canvas's background colour if no video is playing).
+    /// Returns the placed clip IDs so the caller can drive a selection
+    /// or animation hint.
+    @discardableResult
+    func placeTitleTemplate(_ template: TitleTemplate, atTime time: TimeInterval) -> [Clip.ID] {
+        recordSnapshot()
+        var newIDs: [Clip.ID] = []
+        for layer in template.layers {
+            let layerStart = max(0, time + layer.startDelay)
+            let layerDuration = max(0.5, template.duration - layer.startDelay)
+            let placement = overlayPlacement(
+                forKind: .caption,
+                preferredStart: layerStart,
+                duration: layerDuration
+            )
+            var clip = Clip(
+                assetID: UUID(),  // placeholder — overlay clips don't reference a real asset
+                timeRange: TimeRange(start: placement.start, duration: layerDuration),
+                sourceRange: TimeRange(start: 0, duration: layerDuration),
+                label: layer.text,
+                text: layer.text,
+                foregroundColor: layer.color,
+                overlaySize: layer.size
+            )
+            // Apply the layer's position offset + animation. ClipTransform
+            // stores its offset as `translation`; we map directly.
+            clip.transform.translation = layer.offset
+            clip.textAnimation = layer.animation
+            project.timeline.tracks[placement.trackIndex].clips.append(clip)
+            project.timeline.tracks[placement.trackIndex].clips
+                .sort { $0.timeRange.start < $1.timeRange.start }
+            newIDs.append(clip.id)
+        }
+        // Select the first layer so the inspector opens onto the title
+        // and the user can tweak text / colour without hunting.
+        if let firstID = newIDs.first {
+            selectedClipID = firstID
+        }
+        Task { await reloadComposition() }
+        return newIDs
+    }
+
     /// Adds a text overlay clip at `time`, automatically stacking on a new
     /// caption track if every existing one overlaps at that time. Default
     /// duration is 3 seconds.

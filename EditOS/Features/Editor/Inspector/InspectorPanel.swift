@@ -436,6 +436,74 @@ private struct ClipInspector: View {
                 format: { String(format: "%.0f pt", $0) },
                 onCommit: nil
             )
+
+            // Animation picker. Picks one of the kinetic-typography
+            // presets to apply across the first N seconds of the clip;
+            // None falls back to plain static text.
+            let live = currentClip(clip.id) ?? clip
+            Text("ANIMATION")
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(0.6)
+                .foregroundStyle(theme.colors.textTertiary)
+
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 64, maximum: 100), spacing: 6)],
+                spacing: 6
+            ) {
+                AnimationChip(
+                    label: "None",
+                    systemImage: "minus.circle",
+                    isSelected: live.textAnimation == nil
+                ) {
+                    updateClipDirect(clip.id) { $0.textAnimation = nil }
+                    reload()
+                }
+                ForEach(TextAnimation.Kind.allCases) { kind in
+                    AnimationChip(
+                        label: kind.displayName,
+                        systemImage: kind.systemImage,
+                        isSelected: live.textAnimation?.kind == kind
+                    ) {
+                        let duration = live.textAnimation?.duration ?? 0.6
+                        updateClipDirect(clip.id) {
+                            $0.textAnimation = TextAnimation(kind: kind, duration: duration)
+                        }
+                        reload()
+                    }
+                }
+            }
+
+            if live.textAnimation != nil {
+                SliderRow(
+                    label: "Duration",
+                    value: Binding(
+                        get: { live.textAnimation?.duration ?? 0.6 },
+                        set: { newValue in
+                            let kind = live.textAnimation?.kind ?? .typewriter
+                            updateClipDirect(clip.id) {
+                                $0.textAnimation = TextAnimation(kind: kind, duration: newValue)
+                            }
+                        }
+                    ),
+                    range: 0.1...3.0,
+                    format: { String(format: "%.2fs", $0) },
+                    onCommit: reload
+                )
+            }
+        }
+    }
+
+    /// Snapshot + mutate a clip directly, no Task hop. Used by the text
+    /// animation picker which needs the inspector to reflect the new
+    /// state immediately, then it reloads composition itself.
+    private func updateClipDirect(_ id: Clip.ID, _ mutate: (inout Clip) -> Void) {
+        model.recordSnapshot()
+        for trackIndex in model.project.timeline.tracks.indices {
+            if let clipIndex = model.project.timeline.tracks[trackIndex].clips
+                .firstIndex(where: { $0.id == id }) {
+                mutate(&model.project.timeline.tracks[trackIndex].clips[clipIndex])
+                break
+            }
         }
     }
 
@@ -612,6 +680,56 @@ private struct ClipInspector: View {
 }
 
 // MARK: - Shared
+
+/// Compact grid cell for picking a text-animation preset. Same shape
+/// as TransitionChip but tighter so we can fit 7+ presets in a single
+/// inspector section.
+private struct AnimationChip: View {
+    @Environment(\.theme) private var theme
+    let label: String
+    let systemImage: String
+    let isSelected: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            VStack(spacing: 2) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 11, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 8, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .frame(maxWidth: .infinity, minHeight: 36)
+            .padding(.vertical, 4)
+            .padding(.horizontal, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(
+                        isSelected
+                            ? AnyShapeStyle(
+                                LinearGradient(
+                                    colors: [theme.colors.accent, theme.colors.accent.opacity(0.8)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            : AnyShapeStyle(theme.colors.surface)
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(
+                        isSelected ? Color.white.opacity(0.15) : theme.colors.border,
+                        lineWidth: 1
+                    )
+            )
+            .foregroundStyle(isSelected ? .white : theme.colors.textPrimary)
+        }
+        .buttonStyle(.plain)
+    }
+}
 
 private struct TransitionChip: View {
     @Environment(\.theme) private var theme

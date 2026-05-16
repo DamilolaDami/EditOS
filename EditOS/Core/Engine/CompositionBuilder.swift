@@ -220,13 +220,20 @@ struct CompositionBuilder: Sendable {
             let end: TimeInterval
             let frames: [CIImage]
             let durations: [TimeInterval]
+            /// GIFs and animated stickers loop forever — text animations
+            /// don't. When `loops == false`, the playhead latches onto
+            /// the final frame once the durations are exhausted instead
+            /// of wrapping back to frame 0.
+            let loops: Bool
 
             func image(at localTime: TimeInterval) -> CIImage? {
                 guard let first = frames.first else { return nil }
                 guard frames.count > 1, !durations.isEmpty else { return first }
                 let loop = durations.reduce(0, +)
                 guard loop > 0 else { return first }
-                let t = localTime.truncatingRemainder(dividingBy: loop)
+                let t = loops
+                    ? localTime.truncatingRemainder(dividingBy: loop)
+                    : min(localTime, loop)
                 var elapsed: TimeInterval = 0
                 for (i, d) in durations.enumerated() {
                     elapsed += d
@@ -247,6 +254,7 @@ struct CompositionBuilder: Sendable {
                             start: clip.timeRange.start,
                             end: clip.timeRange.end,
                             frames: rendered.frames,
+                            loops: rendered.loops,
                             durations: rendered.durations
                         ))
                     }
@@ -533,11 +541,25 @@ struct CompositionBuilder: Sendable {
     struct RenderedOverlay: Sendable {
         let frames: [CIImage]
         let durations: [TimeInterval]
+        /// Animated stickers / GIFs loop forever. Text animations
+        /// don't — they run once and latch the final frame for the
+        /// remainder of the clip's range.
+        let loops: Bool
+
+        init(frames: [CIImage], durations: [TimeInterval], loops: Bool = true) {
+            self.frames = frames
+            self.durations = durations
+            self.loops = loops
+        }
     }
 
     /// Returns the positioned frames + durations for a text / sticker / SF
     /// Symbol clip, or nil if the clip isn't an overlay. Animated GIFs come
     /// back with a frame per encoded image and matching delay durations.
+    /// Text clips with a `textAnimation` set come back as a sequence of
+    /// frames covering the intro animation, plus one final frame for the
+    /// post-animation static portion, with `loops = false` so the overlay
+    /// instance latches the final frame instead of cycling.
     @MainActor
     private static func renderOverlay(for clip: Clip, canvas: CGSize) -> RenderedOverlay? {
         let dx = clip.transform.translation.width
@@ -547,6 +569,13 @@ struct CompositionBuilder: Sendable {
         if let text = clip.text {
             let size = clip.overlaySize ?? 64
             let color = clip.foregroundColor ?? .white
+            if let animation = clip.textAnimation {
+                return renderAnimatedTextOverlay(
+                    text: text, fontSize: size, color: color,
+                    canvas: canvas, dx: dx, dy: dy, opacity: opacity,
+                    animation: animation
+                )
+            }
             if let image = renderTextOverlay(
                 text: text, fontSize: size, color: color,
                 canvas: canvas, dx: dx, dy: dy, opacity: opacity
@@ -572,6 +601,142 @@ struct CompositionBuilder: Sendable {
             }
         }
         return nil
+    }
+
+    /// Pre-rasterise the text animation as a sequence of frames sampled
+    /// at ~30 fps across `animation.duration`, plus one final static
+    /// frame for the remainder of the clip's range. Setting `loops` to
+    /// `false` makes `OverlayInstance.image(at:)` latch onto that final
+    /// frame after the animation finishes instead of cycling.
+    @MainActor
+    private static func renderAnimatedTextOverlay(
+        text: String,
+        fontSize: CGFloat,
+        color: ColorRGBA,
+        canvas: CGSize,
+        dx: CGFloat,
+        dy: CGFloat,
+        opacity: Double,
+        animation: TextAnimation
+    ) -> RenderedOverlay? {
+        let frameCount = max(2, Int(animation.duration * 30))
+        let dtAnimation = animation.duration / Double(frameCount)
+
+        var frames: [CIImage] = []
+        var durations: [TimeInterval] = []
+
+        for i in 0..<frameCount {
+            let progress = Double(i + 1) / Double(frameCount)
+            if let frame = renderTextFrame(
+                text: text, fontSize: fontSize, color: color,
+                canvas: canvas, dx: dx, dy: dy, opacity: opacity,
+                animation: animation, progress: progress
+            ) {
+                frames.append(frame)
+                durations.append(dtAnimation)
+            }
+        }
+
+        // Final frame: full text, no animation effect, held for the
+        // remainder of the clip. We don't know the clip's full duration
+        // here so we pick a very-long hold value; `loops = false` makes
+        // the overlay instance latch this frame instead of cycling.
+        if let final = renderTextOverlay(
+            text: text, fontSize: fontSize, color: color,
+            canvas: canvas, dx: dx, dy: dy, opacity: opacity
+        ) {
+            frames.append(final)
+            durations.append(86_400)  // 1 day — effectively "forever"
+        }
+
+        guard !frames.isEmpty else { return nil }
+        return RenderedOverlay(frames: frames, durations: durations, loops: false)
+    }
+
+    /// Renders a single frame of the animation at `progress` ∈ [0, 1].
+    /// The animation kinds vary which aspect of the text gets tweened:
+    /// - `.typewriter` reveals characters one at a time.
+    /// - `.fadeInWord` fades words in left-to-right.
+    /// - `.slideFromBottom/Left/Right` tween position from off-canvas.
+    /// - `.popBounce` scales 0 → 1 with overshoot.
+    /// - `.scaleUp` linear scale 0 → 1.
+    @MainActor
+    private static func renderTextFrame(
+        text: String,
+        fontSize: CGFloat,
+        color: ColorRGBA,
+        canvas: CGSize,
+        dx: CGFloat,
+        dy: CGFloat,
+        opacity: Double,
+        animation: TextAnimation,
+        progress: Double
+    ) -> CIImage? {
+        switch animation.kind {
+        case .typewriter:
+            let count = text.count
+            let visibleCount = max(0, Int(Double(count) * progress))
+            let visible = String(text.prefix(visibleCount))
+            return renderTextOverlay(
+                text: visible.isEmpty ? " " : visible,
+                fontSize: fontSize, color: color,
+                canvas: canvas, dx: dx, dy: dy, opacity: opacity
+            )
+
+        case .fadeInWord:
+            // Fade each word in over its slice of the progress range.
+            // The simplest convincing version: hold the *full* text and
+            // ramp opacity linearly. For per-word control we'd need to
+            // render each word separately, which is heavier; the linear
+            // ramp reads as "fade-in" already.
+            let eased = TextAnimation.easeOut(progress)
+            return renderTextOverlay(
+                text: text, fontSize: fontSize, color: color,
+                canvas: canvas, dx: dx, dy: dy, opacity: opacity * eased
+            )
+
+        case .slideFromBottom:
+            let eased = TextAnimation.easeOut(progress)
+            let offset = canvas.height * 0.5 * (1 - eased)
+            return renderTextOverlay(
+                text: text, fontSize: fontSize, color: color,
+                canvas: canvas, dx: dx, dy: dy + offset, opacity: opacity * eased
+            )
+
+        case .slideFromLeft:
+            let eased = TextAnimation.easeOut(progress)
+            let offset = canvas.width * 0.5 * (1 - eased)
+            return renderTextOverlay(
+                text: text, fontSize: fontSize, color: color,
+                canvas: canvas, dx: dx - offset, dy: dy, opacity: opacity * eased
+            )
+
+        case .slideFromRight:
+            let eased = TextAnimation.easeOut(progress)
+            let offset = canvas.width * 0.5 * (1 - eased)
+            return renderTextOverlay(
+                text: text, fontSize: fontSize, color: color,
+                canvas: canvas, dx: dx + offset, dy: dy, opacity: opacity * eased
+            )
+
+        case .popBounce:
+            let scale = TextAnimation.easeOutBack(progress)
+            // Render at the *scaled* font size; cheap approximation of
+            // a scale transform that doesn't require CIImage warping.
+            return renderTextOverlay(
+                text: text, fontSize: max(1, fontSize * CGFloat(scale)),
+                color: color, canvas: canvas, dx: dx, dy: dy,
+                opacity: opacity * min(1, progress * 2)
+            )
+
+        case .scaleUp:
+            let eased = TextAnimation.easeOut(progress)
+            return renderTextOverlay(
+                text: text, fontSize: max(1, fontSize * CGFloat(eased)),
+                color: color, canvas: canvas, dx: dx, dy: dy,
+                opacity: opacity * eased
+            )
+        }
     }
 
     private static func renderTextOverlay(
