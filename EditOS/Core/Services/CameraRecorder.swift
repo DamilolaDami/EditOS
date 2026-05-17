@@ -24,18 +24,12 @@ final class CameraRecorder: NSObject {
 
     private static let log = Logger(subsystem: "com.damioffice.EditOS", category: "CameraRecorder")
 
-    /// Frames the writer discards after the data-output delegate
-    /// attaches — gives the camera ISP time to settle so the cam .mov
-    /// doesn't open on black/half-exposed frames.
-    /// ~333 ms at 30 fps. Webcams usually settle within 200-300 ms;
-    /// rounding up adds margin for slower devices.
-    nonisolated static let warmupFrames: Int = 10
-    /// Wall-clock equivalent of the dropped warm-up. The recorder
-    /// coordinator uses this to offset the cam clip's
-    /// `timeRange.start` so lip-sync against the screen audio stays
-    /// correct (audio at project t=0 was captured at wall-clock T,
-    /// cam .mov's t=0 is wall-clock T + warmupDuration).
-    nonisolated static let warmupDuration: TimeInterval = Double(warmupFrames) / 30.0
+    /// Host-clock seconds at which the first video sample arrived.
+    /// SCStream and AVCaptureVideoDataOutput both stamp samples with
+    /// CMClockGetHostTimeClock, so subtracting one from the other
+    /// gives the real wall-clock offset between the two recorders'
+    /// first frames — proper sync, no guessing.
+    private(set) var firstSamplePTSSeconds: TimeInterval?
 
     /// Exposed so the selection overlay's `AVCaptureVideoPreviewLayer`
     /// can render the live feed.
@@ -120,6 +114,7 @@ final class CameraRecorder: NSObject {
         }
 
         self.output = output
+        firstSamplePTSSeconds = nil
         videoOutput.setSampleBufferDelegate(output, queue: outputQueue)
 
         isRecording = true
@@ -149,6 +144,12 @@ final class CameraRecorder: NSObject {
             let first = await group.next() ?? nil
             group.cancelAll()
             return first
+        }
+
+        // Snapshot the first PTS the writer accepted so the coordinator
+        // can compute the wall-clock offset against the screen track.
+        if let pts = output.firstSamplePTS {
+            firstSamplePTSSeconds = pts.seconds
         }
 
         if url == nil {
@@ -255,14 +256,14 @@ private final class WriterOutput: NSObject, AVCaptureVideoDataOutputSampleBuffer
     let videoAdaptor: AVAssetWriterInputPixelBufferAdaptor
     private nonisolated(unsafe) var hasStartedSession = false
     private nonisolated(unsafe) var _appendedFrameCount: Int = 0
-    /// Frames received from the capture output before we start the
-    /// writer session. The camera's ISP delivers a handful of black /
-    /// half-exposed frames right after the data-output delegate is
-    /// attached; skipping them keeps the .mov's first frame (and
-    /// therefore the Media-panel thumbnail + the PIP's first preview
-    /// frame in the editor) on real content rather than a flicker of
-    /// black.
-    private nonisolated(unsafe) var framesReceived: Int = 0
+    /// PTS of the first kept video sample (in the host-clock domain
+    /// AVCaptureVideoDataOutput stamps onto every CMSampleBuffer).
+    /// Exposed so the coordinator can compute the wall-clock offset
+    /// against the screen recorder's first audio/video sample and
+    /// place the cam clip at the exact right position on the
+    /// timeline — proper sync, not a guess.
+    private nonisolated(unsafe) var _firstSamplePTS: CMTime?
+    var firstSamplePTS: CMTime? { _firstSamplePTS }
     var appendedFrameCount: Int { _appendedFrameCount }
 
     init(outputURL: URL, width: Int, height: Int) throws {
@@ -303,16 +304,11 @@ private final class WriterOutput: NSObject, AVCaptureVideoDataOutputSampleBuffer
         guard writer.status == .writing else { return }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        framesReceived += 1
-        // Skip the warm-up frames before opening the writer session.
-        // After this point everything appended is real content, so
-        // the file's t=0 is a real frame.
-        guard framesReceived > CameraRecorder.warmupFrames else { return }
-
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if !hasStartedSession {
             writer.startSession(atSourceTime: pts)
             hasStartedSession = true
+            _firstSamplePTS = pts
         }
         if videoInput.isReadyForMoreMediaData {
             if videoAdaptor.append(pixelBuffer, withPresentationTime: pts) {

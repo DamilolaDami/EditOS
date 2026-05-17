@@ -393,17 +393,24 @@ final class RecorderCoordinator: NSObject {
                 }
 
                 if let cameraAsset {
-                    // The cam writer drops the camera's first
-                    // `warmupFrames` to skip black ISP-settling frames.
-                    // That makes the cam .mov's t=0 land `warmupDuration`
-                    // after the screen audio's t=0 in wall-clock time —
-                    // offsetting the cam clip's start by that same
-                    // delta restores lip-sync against the recorded
-                    // voice on the screen track.
-                    let warmupOffset = CameraRecorder.warmupDuration
+                    // Proper wall-clock alignment. SCStream and
+                    // AVCaptureVideoDataOutput both stamp samples with
+                    // CMClockGetHostTimeClock, so the delta between
+                    // their first-kept PTSs is the exact real-world
+                    // gap between when the screen started recording
+                    // and when the camera's first frame landed. No
+                    // guessing — the cam clip lands at the precise
+                    // moment its first frame was actually captured.
+                    let camOffset: TimeInterval
+                    if let screenPTS = recorder.firstSamplePTSSeconds,
+                       let camPTS = cameraRecorder.firstSamplePTSSeconds {
+                        camOffset = max(0, camPTS - screenPTS)
+                    } else {
+                        camOffset = 0
+                    }
                     var cameraClip = Clip(
                         assetID: cameraAsset.id,
-                        timeRange: TimeRange(start: warmupOffset, duration: cameraAsset.duration),
+                        timeRange: TimeRange(start: camOffset, duration: cameraAsset.duration),
                         sourceRange: TimeRange(start: 0, duration: cameraAsset.duration)
                     )
                     cameraClip.pipFrame = .bottomRight

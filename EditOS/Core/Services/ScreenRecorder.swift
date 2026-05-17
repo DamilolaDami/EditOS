@@ -31,6 +31,12 @@ final class ScreenRecorder: NSObject {
     /// coordinator to put a real error message in the failure alert
     /// instead of a generic "something broke" string.
     private(set) var lastError: Error?
+    /// Host-clock seconds at which the first kept video sample arrived.
+    /// SCStream stamps samples with `CMClockGetHostTimeClock`, the same
+    /// clock AVCaptureSession uses, so this can be diff'd against the
+    /// camera recorder's first PTS to derive the exact wall-clock
+    /// offset between the two recordings (proper sync, no guessing).
+    private(set) var firstSamplePTSSeconds: TimeInterval?
 
     private static let log = Logger(subsystem: "com.damioffice.EditOS", category: "ScreenRecorder")
 
@@ -125,6 +131,7 @@ final class ScreenRecorder: NSObject {
 
         isRecording = true
         elapsedSeconds = 0
+        firstSamplePTSSeconds = nil
         startWallTime = Date()
         elapsedTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -152,6 +159,12 @@ final class ScreenRecorder: NSObject {
         }
 
         let result = await output.finish()
+
+        // Snapshot the first PTS for the coordinator's wall-clock
+        // offset math against the camera recorder.
+        if let pts = output.firstSamplePTS {
+            firstSamplePTSSeconds = pts.seconds
+        }
 
         self.stream = nil
         self.output = nil
@@ -224,6 +237,10 @@ private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     let audioInput: AVAssetWriterInput?
 
     private nonisolated(unsafe) var hasStartedSession = false
+    /// First-video-sample PTS, exposed for wall-clock alignment with
+    /// the camera recorder.
+    private nonisolated(unsafe) var _firstSamplePTS: CMTime?
+    var firstSamplePTS: CMTime? { _firstSamplePTS }
 
     init(outputURL: URL, configuration: SCStreamConfiguration, includeAudio: Bool) throws {
         self.writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
@@ -316,6 +333,7 @@ private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
             if !hasStartedSession {
                 writer.startSession(atSourceTime: pts)
                 hasStartedSession = true
+                _firstSamplePTS = pts
             }
             // Pull the pixel buffer out and feed it through the
             // adaptor. This skips whatever SCStream-specific sample
