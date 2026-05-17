@@ -1,19 +1,20 @@
 import AVFoundation
+import CoreMedia
 import Foundation
 import Observation
 import OSLog
 
-/// Wraps `AVCaptureSession` + `AVCaptureMovieFileOutput` to record from
-/// the default camera into a stand-alone `.mov` while the screen
-/// recorder is also running. The two recorders are orchestrated in
-/// parallel by `RecorderCoordinator` so a single Stop tap finalises
-/// both files.
+/// Captures the default camera to a `.mov` while the screen recorder
+/// is running in parallel.
 ///
-/// V1 captures from `defaultDevice(for: .video)` with no per-device
-/// configuration — camera selection lives behind a v2 toggle. Audio is
-/// intentionally left off this recorder; the screen recorder owns the
-/// audio track (system + mic) so mixing them across two outputs would
-/// double-record.
+/// Uses `AVCaptureVideoDataOutput` + a manual `AVAssetWriter` rather
+/// than `AVCaptureMovieFileOutput`. The latter has a silent-failure
+/// mode where `startRecording` is accepted but no
+/// `didStartRecordingTo` / `didFinishRecordingTo` delegate callback
+/// ever fires — leaving the coordinator awaiting a continuation that
+/// never resumes and producing no file on disk. The video-data-output
+/// path mirrors how `ScreenRecorder` writes screen frames and gives us
+/// every per-frame signal we need to diagnose problems.
 @MainActor
 @Observable
 final class CameraRecorder: NSObject {
@@ -23,38 +24,26 @@ final class CameraRecorder: NSObject {
 
     private static let log = Logger(subsystem: "com.damioffice.EditOS", category: "CameraRecorder")
 
-    /// Exposed so the selection-overlay + recording-active frame
-    /// overlay can wire `AVCaptureVideoPreviewLayer` to it and show
-    /// the live camera feed before / during the actual recording.
+    /// Exposed so the selection overlay's `AVCaptureVideoPreviewLayer`
+    /// can render the live feed.
     let session = AVCaptureSession()
-    private let movieOutput = AVCaptureMovieFileOutput()
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let outputQueue = DispatchQueue(label: "com.damioffice.EditOS.CameraRecorder.frames", qos: .userInitiated)
     private var configured = false
 
-    /// `true` when the capture session is up and running (which may
-    /// be the case even when no recording is active — see
-    /// `prepareSession()` for the preview-only path).
-    var isSessionRunning: Bool { session.isRunning }
+    /// Owns the on-disk writer + the per-frame append loop. Lives off
+    /// MainActor — the AVCaptureVideoDataOutput delegate fires on a
+    /// background queue and writing has to keep up with 30 fps.
+    private var output: WriterOutput?
 
-    /// Resume callback that resolves when
-    /// `fileOutput(_:didFinishRecordingTo:from:error:)` fires. Closure
-    /// rather than a raw continuation so a timeout watchdog and the
-    /// delegate can both call it — whoever wins resumes the awaiter
-    /// and subsequent calls become no-ops via the lock inside.
-    private var stopContinuation: ((URL?) -> Void)?
+    var isSessionRunning: Bool { session.isRunning }
 
     // MARK: - Permission
 
-    /// `true` when the user has previously granted camera permission;
-    /// `false` when they've denied or haven't been asked. Caller pre-
-    /// flights this so the macOS TCC prompt fires before any overlay
-    /// is on top of it.
     static var isAuthorized: Bool {
         AVCaptureDevice.authorizationStatus(for: .video) == .authorized
     }
 
-    /// Synchronously triggers the permission dialog if it hasn't been
-    /// asked before. Returns true on grant, false on deny / not-asked-
-    /// and-deferred. Mirrors `CGRequestScreenCaptureAccess()` shape.
     static func requestAuthorization() async -> Bool {
         await withCheckedContinuation { cont in
             AVCaptureDevice.requestAccess(for: .video) { granted in
@@ -63,35 +52,34 @@ final class CameraRecorder: NSObject {
         }
     }
 
-    // MARK: - Public API
+    // MARK: - Session lifecycle
 
-    /// Configure the session + start it running, without beginning a
-    /// file recording. Used by the selection overlay to show a live
-    /// preview before the user hits Start, and to keep the preview
-    /// alive between toggling Camera off → on without tearing down
-    /// the AVCaptureSession each time.
+    /// Configure the session + start it running, without writing a
+    /// file. Used by the selection overlay to power its live preview
+    /// and to keep the camera warm between toggling Camera off → on.
     func prepareSession() async throws {
         guard Self.isAuthorized else { throw CameraRecorderError.permissionDenied }
         try configureIfNeeded()
         guard !session.isRunning else { return }
-        // `startRunning()` is blocking — hop off MainActor so the few
-        // hundred ms of camera spin-up don't stall the UI.
         await Task.detached { [session] in session.startRunning() }.value
+        Self.log.info("Camera session running")
     }
 
-    /// Stop the session and release the camera. Safe to call when no
-    /// session has ever started; idempotent.
+    /// Stop the session and release the camera (turns the green light
+    /// off). Best-effort terminates any in-progress recording first.
     func endSession() async {
-        if movieOutput.isRecording {
-            movieOutput.stopRecording()
+        if isRecording {
+            _ = await stop()
         }
         guard session.isRunning else { return }
         await Task.detached { [session] in session.stopRunning() }.value
+        Self.log.info("Camera session stopped")
     }
 
-    /// Begin writing a movie file to disk. Requires that
-    /// `prepareSession()` has run successfully (or it runs that path
-    /// itself). Returns the file URL being written.
+    // MARK: - Recording
+
+    /// Begin writing frames from the data output to a new `.mov`.
+    /// Requires `prepareSession()` has run; runs it itself if not.
     @discardableResult
     func start() async throws -> URL {
         guard !isRecording else { throw CameraRecorderError.alreadyRecording }
@@ -100,50 +88,67 @@ final class CameraRecorder: NSObject {
         let url = try Self.makeOutputURL()
         try? FileManager.default.removeItem(at: url)
 
-        movieOutput.startRecording(to: url, recordingDelegate: self)
+        // Detect the active capture format's resolution so the writer
+        // matches what the input device actually delivers. Falling
+        // back to 1280×720 for the (unlikely) case the input isn't
+        // queryable yet.
+        let dimensions = currentInputDimensions() ?? CGSize(width: 1280, height: 720)
+        let evenWidth = (Int(dimensions.width) / 2) * 2
+        let evenHeight = (Int(dimensions.height) / 2) * 2
+        Self.log.info("Camera writing at \(evenWidth, privacy: .public)x\(evenHeight, privacy: .public) → \(url.path, privacy: .public)")
+
+        let output = try WriterOutput(outputURL: url, width: evenWidth, height: evenHeight)
+        guard output.writer.startWriting() else {
+            let err = output.writer.error ?? NSError(
+                domain: "CameraRecorder", code: -10,
+                userInfo: [NSLocalizedDescriptionKey: "AVAssetWriter refused to start"]
+            )
+            throw CameraRecorderError.writerRefused(err)
+        }
+
+        self.output = output
+        videoOutput.setSampleBufferDelegate(output, queue: outputQueue)
+
         isRecording = true
         lastRecordingURL = url
         lastError = nil
         return url
     }
 
-    /// Stop the active movie recording. Leaves the session running so
-    /// the caller can decide whether to also call `endSession()` —
-    /// typically used right after to fully release the camera.
-    ///
-    /// Bounded by a 5s watchdog: if AVCaptureMovieFileOutput's
-    /// finish-recording delegate never fires (we've seen it stick when
-    /// the session was interrupted or no frames were actually written),
-    /// the watchdog resumes the awaiter with `nil` instead of
-    /// deadlocking the whole stop flow. That keeps the coordinator's
-    /// post-recording UI alive so the user sees a result either way.
+    /// Stop the active recording and finalise the file. Watchdog'd at
+    /// 5s in case `writer.finishWriting()` ever stalls (it shouldn't,
+    /// but defensive).
     @discardableResult
     func stop() async -> URL? {
-        guard isRecording else { return nil }
+        guard isRecording, let output else { return nil }
         isRecording = false
 
-        let url: URL? = await withCheckedContinuation { cont in
-            let lock = NSLock()
-            var didResume = false
-            let resume: (URL?) -> Void = { value in
-                lock.lock()
-                let shouldResume = !didResume
-                didResume = true
-                lock.unlock()
-                if shouldResume {
-                    cont.resume(returning: value)
-                }
-            }
-            self.stopContinuation = resume
-            movieOutput.stopRecording()
-            // Watchdog. Independent Task so it isn't tied to MainActor
-            // re-entrancy.
-            Task.detached {
+        // Detach the delegate so no more frames land while the writer
+        // is finalising.
+        videoOutput.setSampleBufferDelegate(nil, queue: nil)
+
+        let url = await withTaskGroup(of: URL?.self) { group -> URL? in
+            group.addTask { await output.finish() }
+            group.addTask {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
-                Self.log.error("Camera stop timeout — AVCaptureMovieFileOutput delegate never fired within 5s, forcing nil result")
-                resume(nil)
+                return nil
             }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
         }
+
+        if url == nil {
+            Self.log.error("Camera stop: finishWriting returned no URL (timeout or status != completed). frames appended: \(output.appendedFrameCount)")
+            lastError = NSError(
+                domain: "CameraRecorder", code: -11,
+                userInfo: [NSLocalizedDescriptionKey: "Writer didn't finalise — \(output.appendedFrameCount) frame(s) appended"]
+            )
+        } else {
+            Self.log.info("Camera stop: wrote \(output.appendedFrameCount) frames")
+        }
+
+        self.output = nil
         return url
     }
 
@@ -166,12 +171,25 @@ final class CameraRecorder: NSObject {
         }
         session.addInput(input)
 
-        guard session.canAddOutput(movieOutput) else {
+        // BGRA matches what AVAssetWriter's pixel-buffer adaptor wants
+        // when we pass `kCVPixelFormatType_32BGRA` source attributes.
+        videoOutput.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: NSNumber(value: kCVPixelFormatType_32BGRA)
+        ]
+        videoOutput.alwaysDiscardsLateVideoFrames = false
+        guard session.canAddOutput(videoOutput) else {
             throw CameraRecorderError.cannotAddOutput
         }
-        session.addOutput(movieOutput)
+        session.addOutput(videoOutput)
 
         configured = true
+    }
+
+    private func currentInputDimensions() -> CGSize? {
+        guard let input = session.inputs.first as? AVCaptureDeviceInput else { return nil }
+        let dims = CMVideoFormatDescriptionGetDimensions(input.device.activeFormat.formatDescription)
+        guard dims.width > 0, dims.height > 0 else { return nil }
+        return CGSize(width: CGFloat(dims.width), height: CGFloat(dims.height))
     }
 
     private static func makeOutputURL() throws -> URL {
@@ -198,52 +216,98 @@ enum CameraRecorderError: LocalizedError {
     case noCamera
     case cannotAddInput
     case cannotAddOutput
+    case writerRefused(Error)
 
     var errorDescription: String? {
         switch self {
-        case .alreadyRecording: return "Camera is already recording."
-        case .permissionDenied: return "Grant Camera access in System Settings → Privacy & Security."
-        case .noCamera:         return "No camera was found on this Mac."
-        case .cannotAddInput:   return "AVCaptureSession refused the camera input."
-        case .cannotAddOutput:  return "AVCaptureSession refused the movie output."
+        case .alreadyRecording:    return "Camera is already recording."
+        case .permissionDenied:    return "Grant Camera access in System Settings → Privacy & Security."
+        case .noCamera:            return "No camera was found on this Mac."
+        case .cannotAddInput:      return "AVCaptureSession refused the camera input."
+        case .cannotAddOutput:     return "AVCaptureSession refused the video output."
+        case .writerRefused(let e): return "AVAssetWriter refused to start: \(e.localizedDescription)"
         }
     }
 }
 
-// MARK: - Delegate
+// MARK: - WriterOutput (per-frame pump)
 
-extension CameraRecorder: AVCaptureFileOutputRecordingDelegate {
-    nonisolated func fileOutput(
-        _ output: AVCaptureFileOutput,
-        didStartRecordingTo fileURL: URL,
-        from connections: [AVCaptureConnection]
-    ) {
-        // If this never fires, the recording didn't actually start —
-        // important diagnostic since stopRecording then often won't
-        // fire `didFinishRecordingTo` either.
-        Self.log.info("Camera didStartRecordingTo \(fileURL.path, privacy: .public)")
+/// Owns the camera's `AVAssetWriter` and appends every video frame
+/// directly from `AVCaptureVideoDataOutput`'s delegate queue. Lives
+/// nonisolated — the queue passed to `setSampleBufferDelegate` is the
+/// natural serialisation point.
+private final class WriterOutput: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+    let writer: AVAssetWriter
+    let videoInput: AVAssetWriterInput
+    let videoAdaptor: AVAssetWriterInputPixelBufferAdaptor
+    private nonisolated(unsafe) var hasStartedSession = false
+    private nonisolated(unsafe) var _appendedFrameCount: Int = 0
+    var appendedFrameCount: Int { _appendedFrameCount }
+
+    init(outputURL: URL, width: Int, height: Int) throws {
+        self.writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
+
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: NSNumber(value: width),
+            AVVideoHeightKey: NSNumber(value: height)
+        ]
+        self.videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        videoInput.expectsMediaDataInRealTime = true
+
+        let pbAttributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: NSNumber(value: kCVPixelFormatType_32BGRA),
+            kCVPixelBufferWidthKey as String: NSNumber(value: width),
+            kCVPixelBufferHeightKey as String: NSNumber(value: height)
+        ]
+        self.videoAdaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: videoInput,
+            sourcePixelBufferAttributes: pbAttributes
+        )
+        guard writer.canAdd(videoInput) else {
+            throw CameraRecorderError.cannotAddOutput
+        }
+        writer.add(videoInput)
+        super.init()
     }
 
-    nonisolated func fileOutput(
-        _ output: AVCaptureFileOutput,
-        didFinishRecordingTo outputFileURL: URL,
-        from connections: [AVCaptureConnection],
-        error: Error?
+    // MARK: AVCaptureVideoDataOutputSampleBufferDelegate
+
+    nonisolated func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
     ) {
-        // The delegate fires on AVFoundation's queue. Hop back to
-        // MainActor so the observable state mutates safely and the
-        // awaited `stop()` resumes on the actor it was called from.
-        Task { @MainActor in
-            if let error {
-                Self.log.error("Camera finishWriting failed: \(error.localizedDescription, privacy: .public)")
-                self.lastError = error
-                try? FileManager.default.removeItem(at: outputFileURL)
-                self.stopContinuation?(nil)
-            } else {
-                Self.log.info("Camera didFinishRecordingTo \(outputFileURL.path, privacy: .public)")
-                self.stopContinuation?(outputFileURL)
-            }
-            self.stopContinuation = nil
+        guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
+        guard writer.status == .writing else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        if !hasStartedSession {
+            writer.startSession(atSourceTime: pts)
+            hasStartedSession = true
         }
+        if videoInput.isReadyForMoreMediaData {
+            if videoAdaptor.append(pixelBuffer, withPresentationTime: pts) {
+                _appendedFrameCount += 1
+            }
+        }
+    }
+
+    /// Finalise the writer and return the URL if it lands in
+    /// `.completed`. Nil on any other state.
+    func finish() async -> URL? {
+        if !hasStartedSession {
+            videoInput.markAsFinished()
+            try? FileManager.default.removeItem(at: writer.outputURL)
+            return nil
+        }
+        videoInput.markAsFinished()
+        await writer.finishWriting()
+        if writer.status == .completed {
+            return writer.outputURL
+        }
+        try? FileManager.default.removeItem(at: writer.outputURL)
+        return nil
     }
 }
