@@ -67,6 +67,15 @@ struct Clip: Identifiable, Hashable, Sendable, Codable {
     /// `textAnimation.duration` seconds of the clip's time range; the
     /// text then stays static for the rest of the clip.
     var textAnimation: TextAnimation? = nil
+    /// PIP frame metadata. Populated when a media video clip lives on
+    /// an `.overlay` track and should render as a picture-in-picture
+    /// rectangle on top of the underlying base video. Coordinates are
+    /// normalised against the project canvas (0…1) so the frame
+    /// scales cleanly across canvas sizes.
+    ///
+    /// V1 stores the metadata; full preview + export rendering is the
+    /// remaining scope on #15.
+    var pipFrame: PipFrame? = nil
 
     init(
         id: UUID = UUID(),
@@ -235,6 +244,35 @@ extension Clip {
         }
         return result
     }
+}
+
+/// Picture-in-picture frame. All values are normalised in `0…1`
+/// against the project canvas — `origin` is the PIP rectangle's
+/// top-left in canvas-space, `size` is the rectangle's width/height
+/// in canvas-space. The composition pipeline reads this to position +
+/// scale the overlay video on top of the base video.
+struct PipFrame: Hashable, Sendable, Codable {
+    var origin: CGPoint
+    var size: CGSize
+    /// Corner radius in *canvas points* (not normalised — radii read
+    /// more intuitively in absolute units).
+    var cornerRadius: CGFloat
+    /// Border thickness in canvas points. `0` = no border.
+    var borderWidth: CGFloat
+    /// Border colour (RGBA, 0…1). Optional so older projects without
+    /// this field keep decoding.
+    var borderColor: ColorRGBA?
+
+    /// Default frame for a fresh camera PIP — 25%×25% pinned to the
+    /// bottom-right of the canvas with a small margin and a subtle
+    /// rounded edge.
+    static let bottomRight = PipFrame(
+        origin: CGPoint(x: 0.72, y: 0.72),
+        size: CGSize(width: 0.25, height: 0.25),
+        cornerRadius: 12,
+        borderWidth: 0,
+        borderColor: nil
+    )
 }
 
 struct ClipTransform: Hashable, Sendable, Codable {

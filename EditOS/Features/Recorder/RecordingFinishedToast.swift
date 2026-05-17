@@ -7,6 +7,10 @@ import SwiftUI
 /// secondary Reveal-in-Finder and QuickTime-preview affordances.
 struct RecordingFinishedToast: View {
     let url: URL
+    /// `true` when a parallel camera recording was also captured. The
+    /// toast surfaces a "+ Camera" tag so the user knows both clips
+    /// will land on the timeline when they tap Open in EditOS.
+    var hasCamera: Bool = false
     let onReveal: () -> Void
     let onOpenInEditor: () -> Void
     let onPreview: () -> Void
@@ -23,9 +27,19 @@ struct RecordingFinishedToast: View {
             }
 
             VStack(alignment: .leading, spacing: 1) {
-                Text("Recording saved")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
+                HStack(spacing: 6) {
+                    Text("Recording saved")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                    if hasCamera {
+                        Text("+ Camera")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.accentColor.opacity(0.55)))
+                    }
+                }
                 Text(url.lastPathComponent)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.65))

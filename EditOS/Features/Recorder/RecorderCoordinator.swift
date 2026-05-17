@@ -26,6 +26,7 @@ import SwiftUI
 @Observable
 final class RecorderCoordinator: NSObject {
     let recorder = ScreenRecorder()
+    let cameraRecorder = CameraRecorder()
 
     /// Back-ref to the host environment so `openInEditor()` can import
     /// the recording into a new project and ask the SwiftUI scene to
@@ -37,8 +38,12 @@ final class RecorderCoordinator: NSObject {
         self.environment = environment
     }
 
-    /// Most recently saved recording — drives the post-recording HUD.
+    /// Most recently saved screen recording — drives the post-recording HUD.
     private(set) var lastRecording: URL?
+    /// Most recently saved camera recording (when the camera toggle was
+    /// on during capture). Auto-imported alongside the screen on Open
+    /// in EditOS.
+    private(set) var lastCameraRecording: URL?
 
     private var selectionWindow: NSWindow?
     private var controlsWindow: NSWindow?
@@ -53,6 +58,7 @@ final class RecorderCoordinator: NSObject {
     /// a window etc.
     private var pendingTarget: RecorderTarget?
     private var pendingIncludeMicrophone = true
+    private var pendingIncludeCamera = false
     /// Selection rect in SwiftUI (top-left origin, points — not pixels)
     /// captured at confirm time. Used to draw the recording-active
     /// frame overlay at the correct location.
@@ -70,7 +76,9 @@ final class RecorderCoordinator: NSObject {
 
         // Pre-flight: the Screen Recording TCC prompt can't appear if
         // our `modalPanel`-level overlay is already on top of it. Check
-        // (and request) permission *before* opening any window.
+        // (and request) permission *before* opening any window. Camera
+        // is requested lazily here too so the user has the option to
+        // toggle it in the overlay without re-prompting later.
         if !CGPreflightScreenCaptureAccess() {
             let granted = CGRequestScreenCaptureAccess()
             if !granted {
@@ -79,7 +87,15 @@ final class RecorderCoordinator: NSObject {
             }
         }
 
-        Task { await openSelectionWindow() }
+        Task {
+            // Camera permission is optional — the user might never
+            // toggle camera on. Ask up-front so the toggle works the
+            // first time they tap it without an interstitial prompt.
+            if !CameraRecorder.isAuthorized {
+                _ = await CameraRecorder.requestAuthorization()
+            }
+            await openSelectionWindow()
+        }
     }
 
     /// Surface a friendly alert pointing the user at System Settings →
@@ -142,9 +158,10 @@ final class RecorderCoordinator: NSObject {
             content: content,
             displayBounds: displayBounds,
             onCancel: { [weak self] in self?.closeSelection() },
-            onConfirm: { [weak self] target, includeMic, screenRect in
+            onConfirm: { [weak self] target, includeMic, includeCamera, screenRect in
                 self?.pendingTarget = target
                 self?.pendingIncludeMicrophone = includeMic
+                self?.pendingIncludeCamera = includeCamera
                 self?.pendingScreenRect = screenRect
                 Task { @MainActor in await self?.beginRecording() }
             }
@@ -184,6 +201,24 @@ final class RecorderCoordinator: NSObject {
                 configuration: configuration,
                 includeMicrophone: pendingIncludeMicrophone
             )
+            // Camera runs in parallel when the toggle was on. Best-
+            // effort start — if the camera fails (permission denied,
+            // no device, etc.) the screen recording continues alone.
+            if pendingIncludeCamera, CameraRecorder.isAuthorized {
+                do {
+                    _ = try await cameraRecorder.start()
+                } catch {
+                    Logger(subsystem: "com.damioffice.EditOS", category: "RecorderCoordinator")
+                        .error("Camera start failed: \(error.localizedDescription, privacy: .public)")
+                    pendingIncludeCamera = false  // skip stop()'s camera branch
+                }
+            } else if pendingIncludeCamera {
+                // User toggled camera but permission isn't there — log
+                // and proceed with screen-only.
+                Logger(subsystem: "com.damioffice.EditOS", category: "RecorderCoordinator")
+                    .error("Camera requested but not authorized")
+                pendingIncludeCamera = false
+            }
             closeSelection()
             openFrameOverlay(for: target, screenRect: pendingScreenRect)
             openControlsWindow()
@@ -201,6 +236,16 @@ final class RecorderCoordinator: NSObject {
 
     func stop() async -> URL? {
         let url = await recorder.stop()
+        // Stop the camera in parallel — it has its own writer and
+        // doesn't share state with ScreenRecorder, so a failure here
+        // shouldn't tank the screen recording's result.
+        let camURL: URL?
+        if cameraRecorder.isRecording {
+            camURL = await cameraRecorder.stop()
+        } else {
+            camURL = nil
+        }
+        lastCameraRecording = camURL
         closeControlsWindow()
         closeFrameOverlay()
         if let url {
@@ -228,23 +273,58 @@ final class RecorderCoordinator: NSObject {
         return url
     }
 
-    /// Import the most recent recording into a freshly-created project
-    /// and surface the editor window. This is the "the whole point" of
-    /// the recorder — capturing footage and dropping it straight into a
-    /// timeline ready to edit.
+    /// Import the most recent screen recording (and the parallel
+    /// camera recording, when one exists) into a freshly-created
+    /// project and surface the editor window. The screen clip lands on
+    /// the default `.video` track at `t=0`; the camera lands on the
+    /// `.overlay` track at `t=0` with `PipFrame.bottomRight` so it's
+    /// structurally ready for the picture-in-picture render path (#15
+    /// follow-up).
     func openInEditor(url: URL) {
         guard let env = environment else { return }
+        let camURL = lastCameraRecording
         Task { @MainActor in
             do {
-                let asset = try await env.mediaImporter.makeAsset(from: url)
-                // Drop the toast now so it doesn't linger behind the new
-                // editor window.
                 self.dismissToast()
+                let screenAsset = try await env.mediaImporter.makeAsset(from: url)
+                let cameraAsset: MediaAsset? = await {
+                    guard let camURL else { return nil }
+                    return try? await env.mediaImporter.makeAsset(from: camURL)
+                }()
+
                 let formatter = DateFormatter()
                 formatter.dateFormat = "MMM d, h:mm a"
                 let name = "Screen recording — \(formatter.string(from: .now))"
                 var project = env.projectStore.createProject(named: name)
-                project.assets.append(asset)
+                project.assets.append(screenAsset)
+                if let cameraAsset { project.assets.append(cameraAsset) }
+
+                // Place clips at t=0 on their respective tracks.
+                let screenClip = Clip(
+                    assetID: screenAsset.id,
+                    timeRange: TimeRange(start: 0, duration: screenAsset.duration),
+                    sourceRange: TimeRange(start: 0, duration: screenAsset.duration)
+                )
+                if let idx = project.timeline.tracks.firstIndex(where: { $0.kind == .video }) {
+                    project.timeline.tracks[idx].clips.append(screenClip)
+                } else {
+                    project.timeline.tracks.append(Track(kind: .video, clips: [screenClip]))
+                }
+
+                if let cameraAsset {
+                    var cameraClip = Clip(
+                        assetID: cameraAsset.id,
+                        timeRange: TimeRange(start: 0, duration: cameraAsset.duration),
+                        sourceRange: TimeRange(start: 0, duration: cameraAsset.duration)
+                    )
+                    cameraClip.pipFrame = .bottomRight
+                    if let idx = project.timeline.tracks.firstIndex(where: { $0.kind == .overlay }) {
+                        project.timeline.tracks[idx].clips.append(cameraClip)
+                    } else {
+                        project.timeline.tracks.append(Track(kind: .overlay, clips: [cameraClip]))
+                    }
+                }
+
                 env.projectStore.update(project)
                 env.recentProjects.recordOpen(project.id)
                 env.openProjectInEditor(project.id)
@@ -326,6 +406,7 @@ final class RecorderCoordinator: NSObject {
 
         let view = RecordingFinishedToast(
             url: url,
+            hasCamera: lastCameraRecording != nil,
             onReveal: {
                 NSWorkspace.shared.activateFileViewerSelecting([url])
             },

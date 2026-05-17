@@ -24,10 +24,11 @@ struct SelectionOverlay: View {
     /// points — not pixels) so the coordinator can position its
     /// recording-active dim overlay over the same area without
     /// re-doing the display-pixel ↔ screen-point conversion.
-    let onConfirm: (RecorderTarget, _ includeMicrophone: Bool, _ screenRect: CGRect?) -> Void
+    let onConfirm: (RecorderTarget, _ includeMicrophone: Bool, _ includeCamera: Bool, _ screenRect: CGRect?) -> Void
 
     @State private var mode: Mode = .region
     @State private var includeMicrophone: Bool = true
+    @State private var includeCamera: Bool = false
 
     /// User's draft rectangle in *screen* (AppKit) coordinates. Lives
     /// here so dragging is responsive; converted to display-local
@@ -346,6 +347,21 @@ struct SelectionOverlay: View {
             .buttonStyle(.plain)
             .help(includeMicrophone ? "Microphone is on" : "Microphone is off")
 
+            // Camera toggle. Records the default camera in parallel
+            // with the screen; the cam .mov auto-imports as a PIP
+            // overlay clip when the user clicks "Open in EditOS".
+            Button {
+                includeCamera.toggle()
+            } label: {
+                Image(systemName: includeCamera ? "video.fill" : "video.slash.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(includeCamera ? .white : .white.opacity(0.55))
+                    .frame(width: 28, height: 28)
+                    .background(.white.opacity(0.12), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help(includeCamera ? "Camera is on" : "Camera is off")
+
             // Window picker — only visible in Window mode. Pops a menu
             // of the on-screen windows so the user can snap the rect
             // to one of them.
@@ -406,7 +422,7 @@ struct SelectionOverlay: View {
             // Start
             Button {
                 if let target = resolveTarget() {
-                    onConfirm(target, includeMicrophone, screenRectForOverlay)
+                    onConfirm(target, includeMicrophone, includeCamera, screenRectForOverlay)
                 }
             } label: {
                 HStack(spacing: 6) {
