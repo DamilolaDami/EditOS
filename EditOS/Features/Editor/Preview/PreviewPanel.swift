@@ -181,6 +181,19 @@ private struct OverlayCanvas: View {
             let scale = canvas.width > 0 && canvas.height > 0
                 ? min(proxy.size.width / canvas.width, proxy.size.height / canvas.height)
                 : 1.0
+            // Aspect-fit rect for the video inside the preview area —
+            // PIP clips anchor against this, not against the proxy
+            // bounds, so they actually land on top of the recorded
+            // video instead of floating in the letterbox / pillarbox
+            // bars on either side.
+            let videoWidth = canvas.width * scale
+            let videoHeight = canvas.height * scale
+            let videoRect = CGRect(
+                x: (proxy.size.width - videoWidth) / 2,
+                y: (proxy.size.height - videoHeight) / 2,
+                width: videoWidth,
+                height: videoHeight
+            )
             ZStack {
                 ForEach(activeOverlays, id: \.id) { clip in
                     if clip.kind == .media,
@@ -190,6 +203,7 @@ private struct OverlayCanvas: View {
                             asset: asset,
                             canvasSize: canvas,
                             canvasScale: scale,
+                            videoRect: videoRect,
                             model: model
                         )
                     } else {
@@ -382,6 +396,12 @@ private struct PipVideoLayer: View {
     let asset: MediaAsset
     let canvasSize: CGSize
     let canvasScale: CGFloat
+    /// Aspect-fit rect for the underlying video inside the preview
+    /// area. The PIP anchors to this rect's bottom-right (via
+    /// `clip.pipFrame`), not to the proxy bounds — without this the
+    /// PIP floats in the letterbox bars when the canvas and preview
+    /// aspect ratios differ.
+    let videoRect: CGRect
     @Bindable var model: EditorViewModel
     @Environment(AppEnvironment.self) private var environment
 
@@ -390,25 +410,46 @@ private struct PipVideoLayer: View {
     /// `true` once the asset has been resolved and the player created.
     /// Used to gate the placeholder.
     @State private var isReady = false
+    /// Set when the URL failed to resolve (missing bookmark, file
+    /// deleted, etc.). Drives a visible "camera unavailable" hint so
+    /// the user can debug instead of seeing a silent empty rect.
+    @State private var loadError: String?
 
     var body: some View {
         let frame = clip.pipFrame ?? .bottomRight
-        // Canvas-space dimensions, then scaled into the preview's
-        // rendered coordinate space.
-        let pipWidth = canvasSize.width * frame.size.width
-        let pipHeight = canvasSize.height * frame.size.height
-        let pipX = canvasSize.width * frame.origin.x
-        let pipY = canvasSize.height * frame.origin.y
-
-        let renderWidth = max(2, pipWidth * canvasScale)
-        let renderHeight = max(2, pipHeight * canvasScale)
-        let renderCenterX = (pipX + pipWidth / 2) * canvasScale
-        let renderCenterY = (pipY + pipHeight / 2) * canvasScale
+        // PIP geometry in *video-rect* coordinates so the PIP sits on
+        // the actual rendered video, not in the chrome around it.
+        let renderWidth = max(2, videoRect.width * frame.size.width)
+        let renderHeight = max(2, videoRect.height * frame.size.height)
+        let renderCenterX = videoRect.minX + videoRect.width * frame.origin.x + renderWidth / 2
+        let renderCenterY = videoRect.minY + videoRect.height * frame.origin.y + renderHeight / 2
         let radius = max(0, frame.cornerRadius * canvasScale)
 
         Group {
             if let player {
                 PipPlayerView(player: player)
+            } else if let loadError {
+                // Surface the failure visibly so it's clear *why* the
+                // PIP isn't rendering instead of silently leaving an
+                // empty box.
+                ZStack {
+                    Color.red.opacity(0.75)
+                    VStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(.white)
+                        Text("Camera unavailable")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .multilineTextAlignment(.center)
+                        Text(loadError)
+                            .font(.system(size: 8))
+                            .foregroundStyle(.white.opacity(0.8))
+                            .lineLimit(2)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 4)
+                    }
+                }
             } else {
                 // Tinted placeholder while the bookmark resolves.
                 LinearGradient(
@@ -448,17 +489,24 @@ private struct PipVideoLayer: View {
     }
 
     private func loadPlayer() async {
-        guard let url = try? await environment.assetResolver.resolve(asset) else { return }
-        await MainActor.run {
-            self.resolvedURL = url
-            let p = AVPlayer(url: url)
-            p.actionAtItemEnd = .pause
-            p.isMuted = true  // audio lives in the screen recording's track
-            self.player = p
-            self.isReady = true
-            self.sync(to: model.playback.currentTime)
-            if model.playback.isPlaying, isInRange(model.playback.currentTime) {
-                p.play()
+        do {
+            let url = try await environment.assetResolver.resolve(asset)
+            await MainActor.run {
+                self.resolvedURL = url
+                let p = AVPlayer(url: url)
+                p.actionAtItemEnd = .pause
+                p.isMuted = true  // audio lives in the screen recording's track
+                self.player = p
+                self.isReady = true
+                self.loadError = nil
+                self.sync(to: model.playback.currentTime)
+                if model.playback.isPlaying, isInRange(model.playback.currentTime) {
+                    p.play()
+                }
+            }
+        } catch {
+            await MainActor.run {
+                self.loadError = error.localizedDescription
             }
         }
     }
