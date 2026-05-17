@@ -48,6 +48,12 @@ final class RecorderCoordinator: NSObject {
     /// had toggled it on. Surfaced in the post-recording flow as an
     /// inline alert so silent failures never sneak through.
     private var cameraStartError: Error?
+    /// Re-entrancy guard for `stop()`. The writer's finalisation +
+    /// camera delegate callback together take ~1–2s; without this,
+    /// a second tap on the Stop button while the first is still
+    /// awaiting kicks off a concurrent stop that races the first one
+    /// and clobbers `lastCameraRecording`.
+    private var isStopping = false
 
     private var selectionWindow: NSWindow?
     private var controlsWindow: NSWindow?
@@ -244,6 +250,21 @@ final class RecorderCoordinator: NSObject {
     }
 
     func stop() async -> URL? {
+        // Ignore the second tap (and beyond) while the first stop is
+        // still finalising the writer. A second concurrent stop kicks
+        // off another recorder.stop()/cameraRecorder.stop() pair that
+        // races and ends up overwriting lastCameraRecording with nil.
+        guard !isStopping else { return nil }
+        isStopping = true
+        defer { isStopping = false }
+
+        // Close the recording-time UI immediately so the user gets
+        // tactile feedback ("the controls disappeared, my click
+        // worked") even though the writer + camera-delegate
+        // finalisation still take ~1–2s after this returns.
+        closeControlsWindow()
+        closeFrameOverlay()
+
         let url = await recorder.stop()
         // Stop the camera in parallel — it has its own writer and
         // doesn't share state with ScreenRecorder, so a failure here
@@ -259,8 +280,6 @@ final class RecorderCoordinator: NSObject {
         // overlay's preview state is no longer active by this point.
         await cameraRecorder.endSession()
         lastCameraRecording = camURL
-        closeControlsWindow()
-        closeFrameOverlay()
         // Refresh the home view's Recent Recordings strip so a newly-
         // saved session appears immediately when the user dismisses
         // the toast and navigates back to Home.
