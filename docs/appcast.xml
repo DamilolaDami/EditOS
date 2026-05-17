@@ -15,6 +15,25 @@
              https://sparkle-project.org/documentation/publishing/ -->
 
         <item>
+            <title>EditOS 1.4</title>
+            <pubDate>Sun, 17 May 2026 01:10:00 +0000</pubDate>
+            <sparkle:version>5</sparkle:version>
+            <sparkle:shortVersionString>1.4</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[
+                <p>Auto-update smoke test: small home-page tagline
+                tweak to confirm the 1.3 installer fix is working
+                end-to-end. After updating, you'll see the new tagline
+                under the EditOS app title on Home.</p>
+            ]]></description>
+            <enclosure
+                url="https://github.com/DamilolaDami/EditOS/releases/download/v1.4.0/EditOS-1.4.dmg"
+                sparkle:edSignature="LdiCdipoZWOlb2pIR6P4zPl0xttautiLJ7GWN9W2Xg17MlDINiUNMcEvtx+cOHpX0j4KtDrCooGv2R724heyDQ=="
+                length="5680737"
+                type="application/octet-stream" />
+        </item>
+
+        <item>
             <title>EditOS 1.3</title>
             <pubDate>Sun, 17 May 2026 00:45:00 +0000</pubDate>
             <sparkle:version>4</sparkle:version>
