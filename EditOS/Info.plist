@@ -21,6 +21,11 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 Damilola. MIT License.</string>
 
+	<!-- Screen recording: ScreenCaptureKit shows the system TCC prompt
+	     on first use; this is the user-facing string in that dialog. -->
+	<key>NSCameraUsageDescription</key>
+	<string>EditOS uses the camera to record alongside your screen for tutorials and reaction videos.</string>
+
 	<!-- Sparkle (auto-update). The public key verifies update payload
 	     signatures so an attacker can't push a malicious binary down
 	     the appcast feed. The matching private key lives only in the

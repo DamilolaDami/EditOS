@@ -117,7 +117,13 @@ struct AppCommands: Commands {
             .disabled(editorModel?.selectedClipIDs.isEmpty ?? true)
         }
 
-        CommandMenu("View") {
+        // Inject into the system View menu instead of creating our own
+        // CommandMenu("View") — SwiftUI auto-creates that menu and a
+        // duplicate would surface as two side-by-side View menus in
+        // the menu bar. `CommandGroup(after: .sidebar)` slots our
+        // entries underneath the system "Show / Hide Sidebar" item.
+        CommandGroup(after: .sidebar) {
+            Divider()
             Button("Zoom In Timeline") {
                 if let editorModel {
                     editorModel.zoom = min(4.0, editorModel.zoom * 1.25)

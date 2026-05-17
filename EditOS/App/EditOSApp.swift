@@ -51,6 +51,13 @@ struct EditOSApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
         .defaultSize(width: 1600, height: 1000)
+
+        // macOS auto-creates "EditOS → Settings…" (⌘,) for the Settings
+        // scene. Hosts our Updates / Integrations / About tabs.
+        Settings {
+            SettingsView()
+                .environment(environment)
+        }
     }
 }
 

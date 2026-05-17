@@ -960,18 +960,7 @@ private struct CreateProjectBanner: View {
 
 private struct QuickActionsRow: View {
     @Environment(\.theme) private var theme
-
-    /// Tinted-icon quick actions. Each entry pairs the title and SF
-    /// Symbol with a per-card tint so the row reads as a colour-coded
-    /// menu rather than three identical cards.
-    private let actions: [(String, String, String, Color)] = [
-        ("Import media", "tray.and.arrow.down", "Video, audio, and images",
-         Color(red: 0.36, green: 0.72, blue: 1.0)),
-        ("Record screen", "record.circle", "Capture your screen",
-         Color(red: 0.96, green: 0.42, blue: 0.42)),
-        ("Open template", "rectangle.stack", "Start from a preset",
-         Color(red: 0.62, green: 0.55, blue: 0.96))
-    ]
+    @Environment(AppEnvironment.self) private var environment
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacing.sm) {
@@ -980,13 +969,29 @@ private struct QuickActionsRow: View {
                 .foregroundStyle(theme.colors.textTertiary)
                 .tracking(0.8)
             HStack(spacing: theme.spacing.md) {
-                ForEach(actions, id: \.0) { item in
-                    QuickActionCard(
-                        title: item.0,
-                        systemImage: item.1,
-                        subtitle: item.2,
-                        tint: item.3
-                    )
+                QuickActionCard(
+                    title: "Import media",
+                    systemImage: "tray.and.arrow.down",
+                    subtitle: "Video, audio, and images",
+                    tint: Color(red: 0.36, green: 0.72, blue: 1.0)
+                ) {
+                    // Stubbed — wired up later (route through MediaImporter).
+                }
+                QuickActionCard(
+                    title: "Record screen",
+                    systemImage: "record.circle",
+                    subtitle: "Capture your screen",
+                    tint: Color(red: 0.96, green: 0.42, blue: 0.42)
+                ) {
+                    environment.recorder.present()
+                }
+                QuickActionCard(
+                    title: "Open template",
+                    systemImage: "rectangle.stack",
+                    subtitle: "Start from a preset",
+                    tint: Color(red: 0.62, green: 0.55, blue: 0.96)
+                ) {
+                    // Stubbed — routes to templates section.
                 }
             }
         }
@@ -999,13 +1004,12 @@ private struct QuickActionCard: View {
     let systemImage: String
     let subtitle: String
     let tint: Color
+    var action: () -> Void = {}
 
     @State private var isHovering = false
 
     var body: some View {
-        Button {
-            // Stubbed — wired up later.
-        } label: {
+        Button(action: action) {
             HStack(spacing: theme.spacing.md) {
                 ZStack {
                     RoundedRectangle(cornerRadius: theme.radius.sm)

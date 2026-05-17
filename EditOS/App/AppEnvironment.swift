@@ -19,6 +19,7 @@ final class AppEnvironment {
     let cloudKitSyncMonitor: CloudKitSyncMonitor
     let recentProjects: RecentProjects
     let sparkle: SparkleUpdater
+    let recorder: RecorderCoordinator
 
     /// Container used to build the SwiftData-backed ProjectStore when one
     /// isn't supplied. Wired from `EditOSApp` at startup.
@@ -55,5 +56,6 @@ final class AppEnvironment {
         // needs to observe `availableUpdate` to drive the in-app
         // banner, so we centralise it.
         self.sparkle = SparkleUpdater()
+        self.recorder = RecorderCoordinator()
     }
 }
