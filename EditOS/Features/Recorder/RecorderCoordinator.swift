@@ -317,10 +317,42 @@ final class RecorderCoordinator: NSObject {
             do {
                 self.dismissToast()
                 let screenAsset = try await env.mediaImporter.makeAsset(from: url)
+                let log = Logger(subsystem: "com.damioffice.EditOS", category: "RecorderCoordinator")
                 let cameraAsset: MediaAsset? = await {
-                    guard let camURL else { return nil }
-                    return try? await env.mediaImporter.makeAsset(from: camURL)
+                    guard let camURL else {
+                        log.info("openInEditor: no camera URL, skipping cam clip")
+                        return nil
+                    }
+                    let fileSize = (try? FileManager.default.attributesOfItem(atPath: camURL.path)[.size]) as? Int64 ?? 0
+                    log.info("openInEditor: cam file at \(camURL.path, privacy: .public) size=\(fileSize)")
+                    guard let asset = try? await env.mediaImporter.makeAsset(from: camURL) else {
+                        log.error("openInEditor: mediaImporter failed for cam .mov — file may be empty/corrupt")
+                        return nil
+                    }
+                    log.info("openInEditor: cam asset duration=\(asset.duration)s nativeSize=\(String(describing: asset.nativeSize), privacy: .public)")
+                    // Silent camera failures sometimes leave a movie
+                    // container with metadata but zero frames — the
+                    // resulting asset has duration ~0, and the cam
+                    // clip would be on the timeline but never visible
+                    // because timeRange.contains(t) is always false.
+                    // Drop it explicitly so the user gets the warning
+                    // path below instead of a phantom PIP.
+                    if asset.duration < 0.1 {
+                        log.error("openInEditor: cam asset duration too short (\(asset.duration)s); dropping")
+                        return nil
+                    }
+                    return asset
                 }()
+                // The user toggled camera on but no usable clip
+                // resulted — surface that explicitly. Without this the
+                // editor opens with only the screen on the timeline
+                // and the user wonders where their camera went.
+                if camURL != nil && cameraAsset == nil {
+                    showCameraFailureAlert(error: NSError(
+                        domain: "RecorderCoordinator", code: -10,
+                        userInfo: [NSLocalizedDescriptionKey: "The camera recording is empty — no frames were captured. This usually means the sandbox blocked the camera mid-record, or the device was unavailable."]
+                    ))
+                }
 
                 let formatter = DateFormatter()
                 formatter.dateFormat = "MMM d, h:mm a"

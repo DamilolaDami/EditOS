@@ -1,5 +1,6 @@
 import SwiftUI
 import AVKit
+import OSLog
 
 struct PreviewPanel: View {
     @Environment(\.theme) private var theme
@@ -489,8 +490,11 @@ private struct PipVideoLayer: View {
     }
 
     private func loadPlayer() async {
+//        let log = Logger(subsystem: "com.damioffice.EditOS", category: "PipVideoLayer")
+//        log.info("loading cam asset \(asset.displayName, privacy: .public) duration=\(asset.duration)s")
         do {
             let url = try await environment.assetResolver.resolve(asset)
+          //  log.info("resolved cam URL: \(url.path, privacy: .public)")
             await MainActor.run {
                 self.resolvedURL = url
                 let p = AVPlayer(url: url)
@@ -505,6 +509,7 @@ private struct PipVideoLayer: View {
                 }
             }
         } catch {
+//            log.error("cam asset resolve failed: \(error.localizedDescription, privacy: .public)")
             await MainActor.run {
                 self.loadError = error.localizedDescription
             }
