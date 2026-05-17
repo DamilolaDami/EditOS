@@ -408,46 +408,6 @@ final class RecorderCoordinator: NSObject {
 
                 env.projectStore.update(project)
                 env.recentProjects.recordOpen(project.id)
-
-                // One-shot diagnostic — dumps every signal we have so
-                // the user can see exactly why the cam path is/isn't
-                // working. Remove once the import flow is solid.
-                let trackSummary = project.timeline.tracks
-                    .map { "  • \($0.kind.displayName): \($0.clips.count) clip(s)" }
-                    .joined(separator: "\n")
-                let camURLString = camURL?.path ?? "— nil"
-                let camFileSize: String
-                if let camURL,
-                   let size = (try? FileManager.default.attributesOfItem(atPath: camURL.path))?[.size] as? Int64 {
-                    camFileSize = "\(size) bytes"
-                } else {
-                    camFileSize = "— file missing"
-                }
-                let camDelegateError = cameraRecorder.lastError?.localizedDescription ?? "— none"
-                let camStartErr = cameraStartError.map { "\(($0 as NSError).domain) #\(($0 as NSError).code): \($0.localizedDescription)" } ?? "— none"
-                let assetResult = cameraAsset
-                    .map { "✓ duration=\($0.duration)s nativeSize=\(String(describing: $0.nativeSize))" }
-                    ?? "✗ asset is nil"
-                let alert = NSAlert()
-                alert.messageText = "Recording imported"
-                alert.informativeText = """
-                Screen: \(screenAsset.displayName) (\(String(format: "%.1f", screenAsset.duration))s)
-
-                Camera capture
-                • pendingIncludeCamera: \(pendingIncludeCamera)
-                • cameraStartError: \(camStartErr)
-                • lastCameraRecording URL: \(camURLString)
-                • file: \(camFileSize)
-                • cameraRecorder.lastError: \(camDelegateError)
-                • mediaImporter result: \(assetResult)
-
-                Project tracks:
-                \(trackSummary)
-                """
-                alert.alertStyle = .informational
-                alert.addButton(withTitle: "Open editor")
-                alert.runModal()
-
                 env.openProjectInEditor(project.id)
             } catch {
                 Logger(subsystem: "com.damioffice.EditOS", category: "RecorderCoordinator")
