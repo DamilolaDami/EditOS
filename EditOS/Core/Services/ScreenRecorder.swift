@@ -385,7 +385,18 @@ private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
         if writer.status == .completed {
             return FinishResult(url: writer.outputURL, error: nil)
         }
-        let err = writer.error
+        // Synthesize a real error even when writer.error is nil — AVAssetWriter
+        // sometimes lands in `.failed` with no attached error, and surfacing
+        // "the file didn't finish writing" with no domain leaves the user
+        // (and us) blind. Capture the raw status integer at minimum.
+        let statusName = ["unknown", "writing", "completed", "failed", "cancelled"]
+        let statusLabel = (0..<statusName.count).contains(writer.status.rawValue)
+            ? statusName[writer.status.rawValue]
+            : "raw-\(writer.status.rawValue)"
+        let err = writer.error ?? NSError(
+            domain: "ScreenRecorder", code: -5,
+            userInfo: [NSLocalizedDescriptionKey: "Writer ended in status .\(statusLabel) (raw \(writer.status.rawValue)) with no attached error."]
+        )
         try? FileManager.default.removeItem(at: writer.outputURL)
         return FinishResult(url: nil, error: err)
     }
