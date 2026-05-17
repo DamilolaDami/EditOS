@@ -248,6 +248,10 @@ final class RecorderCoordinator: NSObject {
         lastCameraRecording = camURL
         closeControlsWindow()
         closeFrameOverlay()
+        // Refresh the home view's Recent Recordings strip so a newly-
+        // saved session appears immediately when the user dismisses
+        // the toast and navigates back to Home.
+        environment?.recordingsLibrary.refresh()
         if let url {
             lastRecording = url
             // Two confirmation signals: a floating toast in the corner
@@ -280,9 +284,14 @@ final class RecorderCoordinator: NSObject {
     /// `.overlay` track at `t=0` with `PipFrame.bottomRight` so it's
     /// structurally ready for the picture-in-picture render path (#15
     /// follow-up).
-    func openInEditor(url: URL) {
+    ///
+    /// `pairedCamera` is honoured when supplied — used by the Home
+    /// view's Recent Recordings strip to import a pair the user picked
+    /// after the fact. Toast callers omit it and we fall back to
+    /// `lastCameraRecording` from the most recent capture session.
+    func openInEditor(url: URL, pairedCamera: URL? = nil) {
         guard let env = environment else { return }
-        let camURL = lastCameraRecording
+        let camURL = pairedCamera ?? lastCameraRecording
         Task { @MainActor in
             do {
                 self.dismissToast()

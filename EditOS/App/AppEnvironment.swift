@@ -20,6 +20,7 @@ final class AppEnvironment {
     let recentProjects: RecentProjects
     let sparkle: SparkleUpdater
     let recorder: RecorderCoordinator
+    let recordingsLibrary: RecordingsLibrary
 
     /// Wired up from `EditOSApp` so any non-View context (e.g. the
     /// screen-recorder coordinator's `NSWindow` callbacks) can request
@@ -63,6 +64,8 @@ final class AppEnvironment {
         // banner, so we centralise it.
         self.sparkle = SparkleUpdater()
         self.recorder = RecorderCoordinator()
+        self.recordingsLibrary = RecordingsLibrary()
         self.recorder.attach(environment: self)
+        self.recordingsLibrary.refresh()
     }
 }

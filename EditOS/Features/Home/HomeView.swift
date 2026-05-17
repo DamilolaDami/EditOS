@@ -72,6 +72,7 @@ struct HomeView: View {
                 }
 
                 QuickActionsRow()
+                RecentRecordingsSection()
                 ProjectGrid(
                     projects: filteredProjects,
                     searchText: $searchText,
@@ -1054,5 +1055,253 @@ private struct QuickActionCard: View {
                 isHovering = hovering
             }
         }
+    }
+}
+
+/// Horizontally-scrolling strip of saved screen recordings. Each card
+/// previews the first frame, shows the recording's name + age + size,
+/// and tags paired camera sessions with a "+ Camera" pill. Clicking a
+/// card kicks the recorder's `openInEditor` flow so the user lands
+/// straight in the editor with the clips placed at `t=0` — same path
+/// the post-recording toast uses.
+///
+/// Hidden when the recordings directory is empty so first-launch users
+/// don't see a barren section.
+private struct RecentRecordingsSection: View {
+    @Environment(\.theme) private var theme
+    @Environment(AppEnvironment.self) private var environment
+
+    var body: some View {
+        let entries = environment.recordingsLibrary.entries
+        Group { recordingsContent(entries: entries) }
+            .onAppear {
+                // Cheap directory listing; covers the case where the
+                // user manually deletes a .mov from Finder while the
+                // home view is parked in the background.
+                environment.recordingsLibrary.refresh()
+            }
+    }
+
+    @ViewBuilder
+    private func recordingsContent(entries: [RecordingsLibrary.Entry]) -> some View {
+        if !entries.isEmpty {
+            VStack(alignment: .leading, spacing: theme.spacing.sm) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("Recent recordings".uppercased())
+                        .font(theme.typography.sectionLabel)
+                        .foregroundStyle(theme.colors.textTertiary)
+                        .tracking(0.8)
+                    Text("\(entries.count)")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(theme.colors.textSecondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(theme.colors.surface))
+                        .overlay(Capsule().stroke(theme.colors.border, lineWidth: 1))
+                    Spacer(minLength: 0)
+                    if let dir = RecordingsLibrary.recordingsDirectory() {
+                        Button {
+                            NSWorkspace.shared.activateFileViewerSelecting([dir])
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "folder")
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text("Show in Finder")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .foregroundStyle(theme.colors.textSecondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open the recordings folder")
+                    }
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: theme.spacing.md) {
+                        ForEach(entries) { entry in
+                            RecordingCard(entry: entry)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .scrollClipDisabled()
+            }
+        }
+    }
+}
+
+/// Single tile in the Recent Recordings strip. 16:9 thumbnail on top,
+/// metadata stacked below. Hover swap on the card background mirrors
+/// the rest of the Home page's tactile pattern.
+private struct RecordingCard: View {
+    @Environment(\.theme) private var theme
+    @Environment(AppEnvironment.self) private var environment
+
+    let entry: RecordingsLibrary.Entry
+
+    @State private var isHovering = false
+    @State private var thumbnail: CGImage?
+
+    private static let dateFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .short
+        return f
+    }()
+
+    private static let sizeFormatter: ByteCountFormatter = {
+        let f = ByteCountFormatter()
+        f.allowedUnits = [.useMB, .useKB, .useGB]
+        f.countStyle = .file
+        return f
+    }()
+
+    var body: some View {
+        Button(action: open) {
+            VStack(alignment: .leading, spacing: 6) {
+                thumbnailView
+                    .frame(width: 200, height: 112)
+                    .clipShape(RoundedRectangle(cornerRadius: theme.radius.sm))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: theme.radius.sm)
+                            .stroke(theme.colors.border.opacity(0.6), lineWidth: 1)
+                    )
+                    .overlay(alignment: .topLeading) {
+                        // Kind pill — Screen vs Camera at a glance.
+                        HStack(spacing: 4) {
+                            Image(systemName: entry.isCameraOnly ? "video.fill" : "rectangle.inset.filled")
+                                .font(.system(size: 8, weight: .semibold))
+                            Text(entry.isCameraOnly ? "CAMERA" : "SCREEN")
+                                .font(.system(size: 8, weight: .heavy))
+                                .tracking(0.5)
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(.black.opacity(0.55)))
+                        .padding(6)
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        if entry.hasCamera && !entry.isCameraOnly {
+                            // Indicates the session also captured the
+                            // webcam — it'll auto-land as a PIP overlay
+                            // when the card is opened.
+                            HStack(spacing: 3) {
+                                Image(systemName: "video.fill")
+                                    .font(.system(size: 8, weight: .semibold))
+                                Text("PIP")
+                                    .font(.system(size: 8, weight: .heavy))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(theme.colors.accent.opacity(0.85)))
+                            .padding(6)
+                        }
+                    }
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(entry.displayName)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(theme.colors.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    HStack(spacing: 6) {
+                        Text(Self.dateFormatter.localizedString(for: entry.creationDate, relativeTo: .now))
+                            .font(.system(size: 10))
+                            .foregroundStyle(theme.colors.textSecondary)
+                        Text("·")
+                            .font(.system(size: 10))
+                            .foregroundStyle(theme.colors.textTertiary)
+                        Text(Self.sizeFormatter.string(fromByteCount: entry.fileSize))
+                            .font(.system(size: 10))
+                            .foregroundStyle(theme.colors.textTertiary)
+                    }
+                }
+                .frame(maxWidth: 200, alignment: .leading)
+            }
+            .padding(theme.spacing.sm)
+            .background(
+                RoundedRectangle(cornerRadius: theme.radius.md)
+                    .fill(isHovering ? theme.colors.surfaceElevated : theme.colors.surface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: theme.radius.md)
+                    .stroke(theme.colors.border, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovering = hovering
+            }
+        }
+        .contextMenu {
+            Button {
+                if let url = entry.primaryURL {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
+            } label: {
+                Label("Reveal in Finder", systemImage: "folder")
+            }
+            Button {
+                if let url = entry.primaryURL {
+                    NSWorkspace.shared.open(url)
+                }
+            } label: {
+                Label("Preview in QuickTime", systemImage: "play.fill")
+            }
+            Divider()
+            Button(role: .destructive) {
+                environment.recordingsLibrary.delete(entry)
+            } label: {
+                Label("Move to Trash", systemImage: "trash")
+            }
+        }
+        .task(id: entry.id) {
+            await loadThumbnail()
+        }
+    }
+
+    private func open() {
+        guard let url = entry.primaryURL else { return }
+        environment.recorder.openInEditor(url: url, pairedCamera: entry.cameraURL)
+    }
+
+    @ViewBuilder
+    private var thumbnailView: some View {
+        if let thumbnail {
+            Image(decorative: thumbnail, scale: 1)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: 200, height: 112)
+                .clipped()
+        } else {
+            // Tinted gradient placeholder — keeps the card from
+            // looking gappy while the poster frame decodes (and serves
+            // as the final fallback if AVAsset can't read the file).
+            LinearGradient(
+                colors: [
+                    theme.colors.accent.opacity(0.30),
+                    theme.colors.accent.opacity(0.08)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .overlay(
+                Image(systemName: entry.isCameraOnly ? "video.fill" : "rectangle.inset.filled")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
+            )
+        }
+    }
+
+    private func loadThumbnail() async {
+        guard let url = entry.primaryURL else { return }
+        let image = await environment.thumbnailGenerator.poster(
+            for: url,
+            at: 0,
+            size: CGSize(width: 400, height: 224)
+        )
+        await MainActor.run { thumbnail = image }
     }
 }
