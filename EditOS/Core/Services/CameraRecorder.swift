@@ -23,9 +23,17 @@ final class CameraRecorder: NSObject {
 
     private static let log = Logger(subsystem: "com.damioffice.EditOS", category: "CameraRecorder")
 
-    private let session = AVCaptureSession()
+    /// Exposed so the selection-overlay + recording-active frame
+    /// overlay can wire `AVCaptureVideoPreviewLayer` to it and show
+    /// the live camera feed before / during the actual recording.
+    let session = AVCaptureSession()
     private let movieOutput = AVCaptureMovieFileOutput()
     private var configured = false
+
+    /// `true` when the capture session is up and running (which may
+    /// be the case even when no recording is active — see
+    /// `prepareSession()` for the preview-only path).
+    var isSessionRunning: Bool { session.isRunning }
 
     /// Continuation that resolves when `fileOutput(_:didFinishRecordingTo:from:error:)`
     /// fires. We park `stop()` on this so the coordinator's awaited
@@ -55,24 +63,41 @@ final class CameraRecorder: NSObject {
 
     // MARK: - Public API
 
-    /// Configure + start the capture session and begin writing the
-    /// movie file. Returns the URL of the file being written.
+    /// Configure the session + start it running, without beginning a
+    /// file recording. Used by the selection overlay to show a live
+    /// preview before the user hits Start, and to keep the preview
+    /// alive between toggling Camera off → on without tearing down
+    /// the AVCaptureSession each time.
+    func prepareSession() async throws {
+        guard Self.isAuthorized else { throw CameraRecorderError.permissionDenied }
+        try configureIfNeeded()
+        guard !session.isRunning else { return }
+        // `startRunning()` is blocking — hop off MainActor so the few
+        // hundred ms of camera spin-up don't stall the UI.
+        await Task.detached { [session] in session.startRunning() }.value
+    }
+
+    /// Stop the session and release the camera. Safe to call when no
+    /// session has ever started; idempotent.
+    func endSession() async {
+        if movieOutput.isRecording {
+            movieOutput.stopRecording()
+        }
+        guard session.isRunning else { return }
+        await Task.detached { [session] in session.stopRunning() }.value
+    }
+
+    /// Begin writing a movie file to disk. Requires that
+    /// `prepareSession()` has run successfully (or it runs that path
+    /// itself). Returns the file URL being written.
     @discardableResult
     func start() async throws -> URL {
         guard !isRecording else { throw CameraRecorderError.alreadyRecording }
-        guard Self.isAuthorized else { throw CameraRecorderError.permissionDenied }
+        try await prepareSession()
 
         let url = try Self.makeOutputURL()
         try? FileManager.default.removeItem(at: url)
 
-        try configureIfNeeded()
-
-        if !session.isRunning {
-            // `startRunning()` is blocking — hop off MainActor so we
-            // don't stall the UI for the few hundred ms the session
-            // takes to spin up the device.
-            await Task.detached { [session] in session.startRunning() }.value
-        }
         movieOutput.startRecording(to: url, recordingDelegate: self)
         isRecording = true
         lastRecordingURL = url
@@ -80,9 +105,9 @@ final class CameraRecorder: NSObject {
         return url
     }
 
-    /// Stops recording and tears down the session. The returned URL is
-    /// the file that was just written; `nil` indicates the writer
-    /// ended in failure (see `lastError`).
+    /// Stop the active movie recording. Leaves the session running so
+    /// the caller can decide whether to also call `endSession()` —
+    /// typically used right after to fully release the camera.
     @discardableResult
     func stop() async -> URL? {
         guard isRecording else { return nil }
@@ -91,10 +116,6 @@ final class CameraRecorder: NSObject {
         let url: URL? = await withCheckedContinuation { cont in
             self.stopContinuation = cont
             movieOutput.stopRecording()
-        }
-
-        if session.isRunning {
-            await Task.detached { [session] in session.stopRunning() }.value
         }
         return url
     }

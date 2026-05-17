@@ -167,6 +167,11 @@ private enum AspectChoice: CaseIterable, Hashable {
 /// on top of the player view. Each overlay is independently selectable,
 /// movable (drag body) and resizable (drag corner handle) — clicks on
 /// empty space fall through to the parent so tap-out-to-deselect still works.
+///
+/// Media clips on `.overlay` tracks (the screen-recorder's camera PIP path)
+/// render as `PipVideoLayer` instead of `OverlayItem` — their position is
+/// driven by `clip.pipFrame` rather than the clip transform, and the
+/// content is a synced AVPlayer view rather than a text/sticker glyph.
 private struct OverlayCanvas: View {
     @Bindable var model: EditorViewModel
 
@@ -178,28 +183,39 @@ private struct OverlayCanvas: View {
                 : 1.0
             ZStack {
                 ForEach(activeOverlays, id: \.id) { clip in
-                    OverlayItem(
-                        clip: clip,
-                        canvasScale: scale,
-                        isSelected: model.selectedClipID == clip.id,
-                        onSelectAndPause: {
-                            model.selectClip(clip.id)
-                            model.playback.pause()
-                        },
-                        onMoveCommit: { canvasDelta in
-                            model.updateClip(clip.id) { c in
-                                c.transform.translation = CGSize(
-                                    width: c.transform.translation.width + canvasDelta.width,
-                                    height: c.transform.translation.height + canvasDelta.height
-                                )
+                    if clip.kind == .media,
+                       let asset = model.project.assets.first(where: { $0.id == clip.assetID }) {
+                        PipVideoLayer(
+                            clip: clip,
+                            asset: asset,
+                            canvasSize: canvas,
+                            canvasScale: scale,
+                            model: model
+                        )
+                    } else {
+                        OverlayItem(
+                            clip: clip,
+                            canvasScale: scale,
+                            isSelected: model.selectedClipID == clip.id,
+                            onSelectAndPause: {
+                                model.selectClip(clip.id)
+                                model.playback.pause()
+                            },
+                            onMoveCommit: { canvasDelta in
+                                model.updateClip(clip.id) { c in
+                                    c.transform.translation = CGSize(
+                                        width: c.transform.translation.width + canvasDelta.width,
+                                        height: c.transform.translation.height + canvasDelta.height
+                                    )
+                                }
+                            },
+                            onResizeCommit: { newSize in
+                                model.updateClip(clip.id) { c in
+                                    c.overlaySize = max(16, newSize)
+                                }
                             }
-                        },
-                        onResizeCommit: { newSize in
-                            model.updateClip(clip.id) { c in
-                                c.overlaySize = max(16, newSize)
-                            }
-                        }
-                    )
+                        )
+                    }
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
@@ -351,6 +367,142 @@ private struct OverlayItem: View {
 
     private func swiftUIColor(_ rgba: ColorRGBA) -> Color {
         Color(red: rgba.red, green: rgba.green, blue: rgba.blue, opacity: rgba.alpha)
+    }
+}
+
+/// Picture-in-picture layer for a media clip living on an `.overlay`
+/// track. Positions itself by `clip.pipFrame` (normalised against the
+/// project canvas) and synchronises a private AVPlayer's clock to the
+/// editor's playback time so the cam track scrubs in lockstep with
+/// the main timeline.
+///
+/// Preview-only for v1 — export bake of PIP still rides on #15.
+private struct PipVideoLayer: View {
+    let clip: Clip
+    let asset: MediaAsset
+    let canvasSize: CGSize
+    let canvasScale: CGFloat
+    @Bindable var model: EditorViewModel
+    @Environment(AppEnvironment.self) private var environment
+
+    @State private var player: AVPlayer?
+    @State private var resolvedURL: URL?
+    /// `true` once the asset has been resolved and the player created.
+    /// Used to gate the placeholder.
+    @State private var isReady = false
+
+    var body: some View {
+        let frame = clip.pipFrame ?? .bottomRight
+        // Canvas-space dimensions, then scaled into the preview's
+        // rendered coordinate space.
+        let pipWidth = canvasSize.width * frame.size.width
+        let pipHeight = canvasSize.height * frame.size.height
+        let pipX = canvasSize.width * frame.origin.x
+        let pipY = canvasSize.height * frame.origin.y
+
+        let renderWidth = max(2, pipWidth * canvasScale)
+        let renderHeight = max(2, pipHeight * canvasScale)
+        let renderCenterX = (pipX + pipWidth / 2) * canvasScale
+        let renderCenterY = (pipY + pipHeight / 2) * canvasScale
+        let radius = max(0, frame.cornerRadius * canvasScale)
+
+        Group {
+            if let player {
+                PipPlayerView(player: player)
+            } else {
+                // Tinted placeholder while the bookmark resolves.
+                LinearGradient(
+                    colors: [.black.opacity(0.55), .black.opacity(0.25)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .overlay(
+                    Image(systemName: "video.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.8))
+                )
+            }
+        }
+        .frame(width: renderWidth, height: renderHeight)
+        .clipShape(RoundedRectangle(cornerRadius: radius))
+        .overlay(
+            RoundedRectangle(cornerRadius: radius)
+                .stroke(.white.opacity(isReady ? 0.0 : 0.25), lineWidth: 1)
+        )
+        .position(x: renderCenterX, y: renderCenterY)
+        .allowsHitTesting(false)
+        .task(id: asset.id) {
+            await loadPlayer()
+        }
+        .onChange(of: model.playback.currentTime) { _, newTime in
+            sync(to: newTime)
+        }
+        .onChange(of: model.playback.isPlaying) { _, playing in
+            guard let player else { return }
+            if playing, isInRange(model.playback.currentTime) {
+                player.play()
+            } else {
+                player.pause()
+            }
+        }
+    }
+
+    private func loadPlayer() async {
+        guard let url = try? await environment.assetResolver.resolve(asset) else { return }
+        await MainActor.run {
+            self.resolvedURL = url
+            let p = AVPlayer(url: url)
+            p.actionAtItemEnd = .pause
+            p.isMuted = true  // audio lives in the screen recording's track
+            self.player = p
+            self.isReady = true
+            self.sync(to: model.playback.currentTime)
+            if model.playback.isPlaying, isInRange(model.playback.currentTime) {
+                p.play()
+            }
+        }
+    }
+
+    private func isInRange(_ projectTime: TimeInterval) -> Bool {
+        let local = projectTime - clip.timeRange.start
+        return local >= 0 && local <= clip.timeRange.duration
+    }
+
+    /// Seeks the PIP player to the project-time mapped into the clip's
+    /// source range. Tolerances allow AVPlayer to land on a nearby
+    /// keyframe rather than decoding a long GOP chain on every scrub.
+    private func sync(to projectTime: TimeInterval) {
+        guard let player else { return }
+        let local = projectTime - clip.timeRange.start
+        if local < 0 || local > clip.timeRange.duration {
+            player.pause()
+            return
+        }
+        let target = CMTime(seconds: local, preferredTimescale: 600)
+        player.seek(
+            to: target,
+            toleranceBefore: CMTime(seconds: 0.05, preferredTimescale: 600),
+            toleranceAfter: CMTime(seconds: 0.05, preferredTimescale: 600)
+        )
+    }
+}
+
+/// NSViewRepresentable wrapper around `AVPlayerView` for the PIP layer.
+/// Identical pattern to `PreviewSurface` further down, just without
+/// the editor's main-player controls (this is a passive overlay).
+private struct PipPlayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.player = player
+        view.controlsStyle = .none
+        view.videoGravity = .resizeAspectFill
+        return view
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        if nsView.player !== player { nsView.player = player }
     }
 }
 

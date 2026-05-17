@@ -19,6 +19,12 @@ struct SelectionOverlay: View {
     /// Display bounds in display-local pixels — used to derive the
     /// capture `sourceRect` when the user is in Region mode.
     let displayBounds: CGRect
+    /// Camera recorder for the live PIP preview when the user toggles
+    /// the Camera switch. The overlay calls `prepareSession()` to
+    /// light up the camera and bind it to an `AVCaptureVideoPreviewLayer`
+    /// inside `CameraPreview`. `endSession()` runs when the toggle
+    /// goes off or the overlay is dismissed without recording.
+    let cameraRecorder: CameraRecorder
     let onCancel: () -> Void
     /// `screenRect` is the SwiftUI-space rectangle (top-left origin,
     /// points — not pixels) so the coordinator can position its
@@ -76,6 +82,13 @@ struct SelectionOverlay: View {
                 selectionFrame(rect: rect)
             }
 
+            // Live camera PIP — same position the recording will land
+            // in (`PipFrame.bottomRight`), so the user can see exactly
+            // what their PIP looks like before they hit Start.
+            if includeCamera {
+                cameraPreviewPip
+            }
+
             // Top-center: mode picker.
             VStack {
                 modePicker
@@ -92,6 +105,22 @@ struct SelectionOverlay: View {
         // chip in the controls bar.
         .onChange(of: mode) { _, newMode in
             applyMode(newMode)
+        }
+        .onChange(of: includeCamera) { _, on in
+            if on {
+                Task { try? await cameraRecorder.prepareSession() }
+            } else {
+                Task { await cameraRecorder.endSession() }
+            }
+        }
+        .onDisappear {
+            // Selection cancelled (e.g. Esc). Tear the camera down so
+            // the green light goes off if we never reached recording.
+            // The recording path takes ownership of the session
+            // afterward by calling start()/stop() itself.
+            if includeCamera, !cameraRecorder.isRecording {
+                Task { await cameraRecorder.endSession() }
+            }
         }
         .onAppear {
             // SwiftUI uses top-left origin inside the overlay window;
@@ -119,6 +148,33 @@ struct SelectionOverlay: View {
     }
 
     // MARK: - Layers
+
+    /// Live camera preview pinned to the bottom-right of the user's
+    /// selected region. Mirrors `PipFrame.bottomRight` (25% × 25%, 3%
+    /// margin) so the user sees exactly the framing they're about to
+    /// record. Falls back to the full screen's bottom-right when no
+    /// region is selected yet.
+    @ViewBuilder
+    private var cameraPreviewPip: some View {
+        let screenSize = NSScreen.main?.frame.size ?? CGSize(width: 1920, height: 1080)
+        let host = selectionRectForDisplay ?? CGRect(origin: .zero, size: screenSize)
+        let pipWidth = host.width * 0.25
+        let pipHeight = host.height * 0.25
+        let margin = min(host.width, host.height) * 0.03
+        let pipX = host.maxX - pipWidth - margin
+        let pipY = host.maxY - pipHeight - margin
+
+        CameraPreview(session: cameraRecorder.session)
+            .frame(width: pipWidth, height: pipHeight)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(.white.opacity(0.9), lineWidth: 2)
+            )
+            .shadow(color: .black.opacity(0.4), radius: 12, y: 4)
+            .position(x: pipX + pipWidth / 2, y: pipY + pipHeight / 2)
+            .allowsHitTesting(false)
+    }
 
     private var dimMask: some View {
         // Cut the selection rectangle out of the dim using the even-odd

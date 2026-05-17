@@ -161,6 +161,7 @@ final class RecorderCoordinator: NSObject {
         let view = SelectionOverlay(
             content: content,
             displayBounds: displayBounds,
+            cameraRecorder: cameraRecorder,
             onCancel: { [weak self] in self?.closeSelection() },
             onConfirm: { [weak self] target, includeMic, includeCamera, screenRect in
                 self?.pendingTarget = target
@@ -253,6 +254,10 @@ final class RecorderCoordinator: NSObject {
         } else {
             camURL = nil
         }
+        // Release the camera — turns the device's green light off and
+        // frees the AVCaptureDevice for other apps. The selection
+        // overlay's preview state is no longer active by this point.
+        await cameraRecorder.endSession()
         lastCameraRecording = camURL
         closeControlsWindow()
         closeFrameOverlay()
@@ -590,7 +595,10 @@ final class RecorderCoordinator: NSObject {
         // recording a permanently-dim screen.
         window.sharingType = .none
 
-        let view = RecordingFrameOverlay(highlight: highlightRect)
+        let view = RecordingFrameOverlay(
+            highlight: highlightRect,
+            cameraSession: cameraRecorder.isSessionRunning ? cameraRecorder.session : nil
+        )
         let hosting = NSHostingView(rootView: view)
         hosting.wantsLayer = true
         hosting.layer?.backgroundColor = NSColor.clear.cgColor
