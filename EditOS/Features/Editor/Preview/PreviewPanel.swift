@@ -477,12 +477,34 @@ private struct PipVideoLayer: View {
             await loadPlayer()
         }
         .onChange(of: model.playback.currentTime) { _, newTime in
-            sync(to: newTime)
+            // Only seek on scrubs (user is paused). During playback
+            // both AVPlayers run at rate 1 from a single alignment
+            // seek at play-time; seeking on every tick made the PIP
+            // briefly black out 30× per second as AVPlayer decoded
+            // each new I-frame.
+            guard let player else { return }
+            if !model.playback.isPlaying {
+                sync(to: newTime)
+                return
+            }
+            // Periodic drift correction — re-seek only if the PIP has
+            // drifted more than 250 ms from where the main playhead
+            // expects it to be.
+            let expected = newTime - clip.timeRange.start
+            let actual = player.currentTime().seconds
+            if expected >= 0, abs(expected - actual) > 0.25 {
+                sync(to: newTime)
+            }
         }
         .onChange(of: model.playback.isPlaying) { _, playing in
             guard let player else { return }
-            if playing, isInRange(model.playback.currentTime) {
-                player.play()
+            if playing {
+                // Align once before kicking the player off; from this
+                // point onwards both players run at rate 1 in lockstep.
+                sync(to: model.playback.currentTime)
+                if isInRange(model.playback.currentTime) {
+                    player.play()
+                }
             } else {
                 player.pause()
             }
