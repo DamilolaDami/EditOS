@@ -24,6 +24,19 @@ final class CameraRecorder: NSObject {
 
     private static let log = Logger(subsystem: "com.damioffice.EditOS", category: "CameraRecorder")
 
+    /// Frames the writer discards after the data-output delegate
+    /// attaches — gives the camera ISP time to settle so the cam .mov
+    /// doesn't open on black/half-exposed frames.
+    /// ~333 ms at 30 fps. Webcams usually settle within 200-300 ms;
+    /// rounding up adds margin for slower devices.
+    nonisolated static let warmupFrames: Int = 10
+    /// Wall-clock equivalent of the dropped warm-up. The recorder
+    /// coordinator uses this to offset the cam clip's
+    /// `timeRange.start` so lip-sync against the screen audio stays
+    /// correct (audio at project t=0 was captured at wall-clock T,
+    /// cam .mov's t=0 is wall-clock T + warmupDuration).
+    nonisolated static let warmupDuration: TimeInterval = Double(warmupFrames) / 30.0
+
     /// Exposed so the selection overlay's `AVCaptureVideoPreviewLayer`
     /// can render the live feed.
     let session = AVCaptureSession()
@@ -250,15 +263,6 @@ private final class WriterOutput: NSObject, AVCaptureVideoDataOutputSampleBuffer
     /// frame in the editor) on real content rather than a flicker of
     /// black.
     private nonisolated(unsafe) var framesReceived: Int = 0
-    /// ~333 ms at 30 fps. Built-in webcams typically settle within
-    /// 200-300 ms; rounding up gives margin for slower devices.
-    static let warmupFrames: Int = 10
-    /// Approximate duration of the dropped warm-up frames. The
-    /// coordinator uses this to offset the cam clip's `timeRange.start`
-    /// so lip-sync against the screen recorder's audio stays correct
-    /// (audio at project time 0 was captured at wall-clock T; the cam
-    /// .mov's t=0 is wall-clock T + warmupDuration).
-    static let warmupDuration: TimeInterval = Double(warmupFrames) / 30.0
     var appendedFrameCount: Int { _appendedFrameCount }
 
     init(outputURL: URL, width: Int, height: Int) throws {
@@ -303,7 +307,7 @@ private final class WriterOutput: NSObject, AVCaptureVideoDataOutputSampleBuffer
         // Skip the warm-up frames before opening the writer session.
         // After this point everything appended is real content, so
         // the file's t=0 is a real frame.
-        guard framesReceived > Self.warmupFrames else { return }
+        guard framesReceived > CameraRecorder.warmupFrames else { return }
 
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if !hasStartedSession {
