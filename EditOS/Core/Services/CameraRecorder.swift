@@ -242,6 +242,17 @@ private final class WriterOutput: NSObject, AVCaptureVideoDataOutputSampleBuffer
     let videoAdaptor: AVAssetWriterInputPixelBufferAdaptor
     private nonisolated(unsafe) var hasStartedSession = false
     private nonisolated(unsafe) var _appendedFrameCount: Int = 0
+    /// Frames received from the capture output before we start the
+    /// writer session. The camera's ISP delivers a handful of black /
+    /// half-exposed frames right after the data-output delegate is
+    /// attached; skipping them keeps the .mov's first frame (and
+    /// therefore the Media-panel thumbnail + the PIP's first preview
+    /// frame in the editor) on real content rather than a flicker of
+    /// black.
+    private nonisolated(unsafe) var framesReceived: Int = 0
+    /// ~166 ms at 30 fps — enough for the ISP to settle on most
+    /// built-in cameras without truncating noticeable content.
+    private let warmupFrames: Int = 5
     var appendedFrameCount: Int { _appendedFrameCount }
 
     init(outputURL: URL, width: Int, height: Int) throws {
@@ -281,6 +292,12 @@ private final class WriterOutput: NSObject, AVCaptureVideoDataOutputSampleBuffer
         guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
         guard writer.status == .writing else { return }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        framesReceived += 1
+        // Skip the warm-up frames before opening the writer session.
+        // After this point everything appended is real content, so
+        // the file's t=0 is a real frame.
+        guard framesReceived > warmupFrames else { return }
 
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if !hasStartedSession {
