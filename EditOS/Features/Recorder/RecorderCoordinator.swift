@@ -44,6 +44,10 @@ final class RecorderCoordinator: NSObject {
     /// on during capture). Auto-imported alongside the screen on Open
     /// in EditOS.
     private(set) var lastCameraRecording: URL?
+    /// Captures the reason the camera failed to start when the user
+    /// had toggled it on. Surfaced in the post-recording flow as an
+    /// inline alert so silent failures never sneak through.
+    private var cameraStartError: Error?
 
     private var selectionWindow: NSWindow?
     private var controlsWindow: NSWindow?
@@ -203,20 +207,24 @@ final class RecorderCoordinator: NSObject {
             )
             // Camera runs in parallel when the toggle was on. Best-
             // effort start — if the camera fails (permission denied,
-            // no device, etc.) the screen recording continues alone.
+            // no device, sandbox entitlement missing, etc.) the screen
+            // recording continues alone and we surface the reason
+            // through the post-recording toast so the user actually
+            // notices instead of silently getting screen-only output.
+            cameraStartError = nil
             if pendingIncludeCamera, CameraRecorder.isAuthorized {
                 do {
                     _ = try await cameraRecorder.start()
                 } catch {
                     Logger(subsystem: "com.damioffice.EditOS", category: "RecorderCoordinator")
                         .error("Camera start failed: \(error.localizedDescription, privacy: .public)")
-                    pendingIncludeCamera = false  // skip stop()'s camera branch
+                    cameraStartError = error
+                    pendingIncludeCamera = false
                 }
             } else if pendingIncludeCamera {
-                // User toggled camera but permission isn't there — log
-                // and proceed with screen-only.
                 Logger(subsystem: "com.damioffice.EditOS", category: "RecorderCoordinator")
                     .error("Camera requested but not authorized")
+                cameraStartError = CameraRecorderError.permissionDenied
                 pendingIncludeCamera = false
             }
             closeSelection()
@@ -263,6 +271,14 @@ final class RecorderCoordinator: NSObject {
             // result of Stop unmissable.
             openFinishedToast(for: url)
             NSWorkspace.shared.activateFileViewerSelecting([url])
+            // If the user toggled the camera but it never started,
+            // pop a brief alert AFTER the toast so the success of
+            // the screen capture isn't drowned out — but the user
+            // still finds out their camera didn't record.
+            if let camError = cameraStartError {
+                showCameraFailureAlert(error: camError)
+                cameraStartError = nil
+            }
         } else {
             // Silent failure was the worst possible UX — the user
             // tapped Stop, the controls disappeared, and nothing told
@@ -341,6 +357,34 @@ final class RecorderCoordinator: NSObject {
                 Logger(subsystem: "com.damioffice.EditOS", category: "RecorderCoordinator")
                     .error("openInEditor failed: \(error.localizedDescription, privacy: .public)")
             }
+        }
+    }
+
+    /// Brief informational alert raised when the user had the camera
+    /// toggle on but the AVCaptureSession failed to start (missing
+    /// permission, missing sandbox entitlement, no camera device,
+    /// etc.). Doesn't block the screen recording success path — fires
+    /// alongside the success toast.
+    private func showCameraFailureAlert(error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "Camera didn't record"
+        alert.informativeText = """
+        Your screen recording saved successfully, but the camera couldn't be captured:
+
+        \(error.localizedDescription)
+
+        On macOS, check System Settings → Privacy & Security → Camera and make sure EditOS is allowed.
+        """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        if case CameraRecorderError.permissionDenied = error {
+            alert.addButton(withTitle: "Open System Settings")
+            if alert.runModal() == .alertSecondButtonReturn,
+               let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera") {
+                NSWorkspace.shared.open(url)
+            }
+        } else {
+            alert.runModal()
         }
     }
 

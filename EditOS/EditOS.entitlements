@@ -26,6 +26,16 @@
 	<true/>
 
 	<!--
+	Sandbox gate for AVCaptureSession with a video input. Without this
+	flag the sandbox quietly denies AVCaptureDevice's request for the
+	camera and the recording light never turns on. NSCameraUsageDescription
+	in Info.plist is necessary but not sufficient — the sandbox needs
+	this entitlement to even *try* to acquire the camera.
+	-->
+	<key>com.apple.security.device.camera</key>
+	<true/>
+
+	<!--
 	Sparkle 2 in a sandboxed app launches its installer XPC service
 	via a mach lookup. The sandbox blocks that lookup by default,
 	surfacing in the UI as "An error occurred while launching the
