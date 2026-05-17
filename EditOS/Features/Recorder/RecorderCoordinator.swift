@@ -389,6 +389,28 @@ final class RecorderCoordinator: NSObject {
 
                 env.projectStore.update(project)
                 env.recentProjects.recordOpen(project.id)
+
+                // One-shot diagnostic banner — shows exactly which
+                // assets + clips ended up in the new project. Easier
+                // than log hunting when we're chasing a missing PIP
+                // and the user can't see the overlay track. Remove
+                // after the import flow is confirmed solid.
+                let trackSummary = project.timeline.tracks
+                    .map { "  • \($0.kind.displayName): \($0.clips.count) clip(s)" }
+                    .joined(separator: "\n")
+                let alert = NSAlert()
+                alert.messageText = "Recording imported"
+                alert.informativeText = """
+                Screen: \(screenAsset.displayName) (\(String(format: "%.1f", screenAsset.duration))s)
+                Camera: \(cameraAsset.map { "\($0.displayName) (\(String(format: "%.1f", $0.duration))s)" } ?? "— none")
+
+                Project tracks:
+                \(trackSummary)
+                """
+                alert.alertStyle = .informational
+                alert.addButton(withTitle: "Open editor")
+                alert.runModal()
+
                 env.openProjectInEditor(project.id)
             } catch {
                 Logger(subsystem: "com.damioffice.EditOS", category: "RecorderCoordinator")
