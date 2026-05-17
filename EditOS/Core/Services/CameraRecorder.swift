@@ -35,10 +35,12 @@ final class CameraRecorder: NSObject {
     /// `prepareSession()` for the preview-only path).
     var isSessionRunning: Bool { session.isRunning }
 
-    /// Continuation that resolves when `fileOutput(_:didFinishRecordingTo:from:error:)`
-    /// fires. We park `stop()` on this so the coordinator's awaited
-    /// stop returns only after the file is actually closed on disk.
-    private var stopContinuation: CheckedContinuation<URL?, Never>?
+    /// Resume callback that resolves when
+    /// `fileOutput(_:didFinishRecordingTo:from:error:)` fires. Closure
+    /// rather than a raw continuation so a timeout watchdog and the
+    /// delegate can both call it — whoever wins resumes the awaiter
+    /// and subsequent calls become no-ops via the lock inside.
+    private var stopContinuation: ((URL?) -> Void)?
 
     // MARK: - Permission
 
@@ -108,14 +110,39 @@ final class CameraRecorder: NSObject {
     /// Stop the active movie recording. Leaves the session running so
     /// the caller can decide whether to also call `endSession()` —
     /// typically used right after to fully release the camera.
+    ///
+    /// Bounded by a 5s watchdog: if AVCaptureMovieFileOutput's
+    /// finish-recording delegate never fires (we've seen it stick when
+    /// the session was interrupted or no frames were actually written),
+    /// the watchdog resumes the awaiter with `nil` instead of
+    /// deadlocking the whole stop flow. That keeps the coordinator's
+    /// post-recording UI alive so the user sees a result either way.
     @discardableResult
     func stop() async -> URL? {
         guard isRecording else { return nil }
         isRecording = false
 
         let url: URL? = await withCheckedContinuation { cont in
-            self.stopContinuation = cont
+            let lock = NSLock()
+            var didResume = false
+            let resume: (URL?) -> Void = { value in
+                lock.lock()
+                let shouldResume = !didResume
+                didResume = true
+                lock.unlock()
+                if shouldResume {
+                    cont.resume(returning: value)
+                }
+            }
+            self.stopContinuation = resume
             movieOutput.stopRecording()
+            // Watchdog. Independent Task so it isn't tied to MainActor
+            // re-entrancy.
+            Task.detached {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                Self.log.error("Camera stop timeout — AVCaptureMovieFileOutput delegate never fired within 5s, forcing nil result")
+                resume(nil)
+            }
         }
         return url
     }
@@ -188,6 +215,17 @@ enum CameraRecorderError: LocalizedError {
 extension CameraRecorder: AVCaptureFileOutputRecordingDelegate {
     nonisolated func fileOutput(
         _ output: AVCaptureFileOutput,
+        didStartRecordingTo fileURL: URL,
+        from connections: [AVCaptureConnection]
+    ) {
+        // If this never fires, the recording didn't actually start —
+        // important diagnostic since stopRecording then often won't
+        // fire `didFinishRecordingTo` either.
+        Self.log.info("Camera didStartRecordingTo \(fileURL.path, privacy: .public)")
+    }
+
+    nonisolated func fileOutput(
+        _ output: AVCaptureFileOutput,
         didFinishRecordingTo outputFileURL: URL,
         from connections: [AVCaptureConnection],
         error: Error?
@@ -200,9 +238,10 @@ extension CameraRecorder: AVCaptureFileOutputRecordingDelegate {
                 Self.log.error("Camera finishWriting failed: \(error.localizedDescription, privacy: .public)")
                 self.lastError = error
                 try? FileManager.default.removeItem(at: outputFileURL)
-                self.stopContinuation?.resume(returning: nil)
+                self.stopContinuation?(nil)
             } else {
-                self.stopContinuation?.resume(returning: outputFileURL)
+                Self.log.info("Camera didFinishRecordingTo \(outputFileURL.path, privacy: .public)")
+                self.stopContinuation?(outputFileURL)
             }
             self.stopContinuation = nil
         }
