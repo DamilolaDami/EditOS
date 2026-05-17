@@ -38,6 +38,11 @@ struct EditOSApp: App {
                 .environment(environment)
                 .modelContainer(modelContainer)
                 .frame(minWidth: 960, minHeight: 640)
+                // Bridge SwiftUI's `openWindow` into the environment so
+                // non-View code (the screen-recorder coordinator running
+                // inside an NSWindow callback) can request the editor
+                // for a freshly-imported screen recording.
+                .background(OpenWindowBridge(environment: environment))
         }
         .windowResizability(.contentMinSize)
         .commands { AppCommands(environment: environment, sparkle: environment.sparkle) }
@@ -64,6 +69,24 @@ struct EditOSApp: App {
 enum WindowID: String {
     case home
     case editor
+}
+
+/// Captures SwiftUI's `openWindow` action and assigns it to
+/// `AppEnvironment.openProjectInEditor`. Lives in the Home scene so
+/// the action is available as long as the app has at least one window.
+private struct OpenWindowBridge: View {
+    let environment: AppEnvironment
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onAppear {
+                environment.openProjectInEditor = { id in
+                    openWindow(id: WindowID.editor.rawValue, value: id)
+                }
+            }
+    }
 }
 
 private struct EditorHost: View {

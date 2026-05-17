@@ -27,6 +27,10 @@ final class ScreenRecorder: NSObject {
     private(set) var isRecording: Bool = false
     private(set) var elapsedSeconds: TimeInterval = 0
     private(set) var lastRecordingURL: URL?
+    /// Last failure surfaced by the writer or the stream. Used by the
+    /// coordinator to put a real error message in the failure alert
+    /// instead of a generic "something broke" string.
+    private(set) var lastError: Error?
 
     private static let log = Logger(subsystem: "com.damioffice.EditOS", category: "ScreenRecorder")
 
@@ -139,6 +143,7 @@ final class ScreenRecorder: NSObject {
         elapsedTimer?.invalidate()
         elapsedTimer = nil
         isRecording = false
+        lastError = nil
 
         do {
             try await stream.stopCapture()
@@ -146,16 +151,18 @@ final class ScreenRecorder: NSObject {
             Self.log.error("stopCapture failed: \(error.localizedDescription, privacy: .public)")
         }
 
-        let url = await output.finish()
+        let result = await output.finish()
 
         self.stream = nil
         self.output = nil
         self.startWallTime = nil
 
-        if let url {
+        if let url = result.url {
             lastRecordingURL = url
+            return url
         }
-        return url
+        lastError = result.error
+        return nil
     }
 
     // MARK: - Output URL
@@ -207,6 +214,13 @@ enum RecorderError: LocalizedError {
 private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     let writer: AVAssetWriter
     let videoInput: AVAssetWriterInput
+    /// Pixel-buffer adaptor wrapping `videoInput`. We feed the writer
+    /// via this adaptor (extracted CVPixelBuffer + PTS) rather than by
+    /// handing the raw CMSampleBuffer to `videoInput.append` directly.
+    /// SCStream samples carry attachment arrays that AVAssetWriter
+    /// trips over with OSStatus -12737 (`kCMSampleBufferError_ArrayTooSmall`);
+    /// the adaptor only sees the pixel data and ignores those.
+    let videoAdaptor: AVAssetWriterInputPixelBufferAdaptor
     let audioInput: AVAssetWriterInput?
 
     private nonisolated(unsafe) var hasStartedSession = false
@@ -214,20 +228,32 @@ private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     init(outputURL: URL, configuration: SCStreamConfiguration, includeAudio: Bool) throws {
         self.writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
 
+        // H.264 requires even-numbered dimensions on most encoders.
+        let evenWidth = (Int(configuration.width) / 2) * 2
+        let evenHeight = (Int(configuration.height) / 2) * 2
+
+        // Codec + dimensions only — mirror Apple's official
+        // ScreenCaptureKit sample. The encoder picks sensible defaults
+        // for profile / level / colorimetry on macOS.
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: NSNumber(value: Int(configuration.width)),
-            AVVideoHeightKey: NSNumber(value: Int(configuration.height)),
-            AVVideoCompressionPropertiesKey: [
-                // ~bytes-per-pixel × pixels × fps target. Clamps the
-                // floor at 2 Mbps so tiny region captures still look
-                // sharp.
-                AVVideoAverageBitRateKey: NSNumber(value: max(2_000_000, configuration.width * configuration.height * 6)),
-                AVVideoMaxKeyFrameIntervalKey: NSNumber(value: 60)
-            ]
+            AVVideoWidthKey: NSNumber(value: evenWidth),
+            AVVideoHeightKey: NSNumber(value: evenHeight)
         ]
         self.videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.expectsMediaDataInRealTime = true
+
+        // Tell the adaptor what pixel format / dimensions to expect.
+        // Matches what SCStream produces (BGRA via `pixelFormat`).
+        let pbAttributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: NSNumber(value: kCVPixelFormatType_32BGRA),
+            kCVPixelBufferWidthKey as String: NSNumber(value: evenWidth),
+            kCVPixelBufferHeightKey as String: NSNumber(value: evenHeight)
+        ]
+        self.videoAdaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: videoInput,
+            sourcePixelBufferAttributes: pbAttributes
+        )
         if writer.canAdd(videoInput) {
             writer.add(videoInput)
         } else {
@@ -238,11 +264,14 @@ private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         if includeAudio {
+            // SCStream delivers system audio at 48 kHz stereo. Asking
+            // the writer for 44.1 kHz forces a resample that the
+            // hardware AAC encoder sometimes refuses, ending the
+            // whole writer in `.failed`. Match the source rate.
             let audioSettings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
                 AVNumberOfChannelsKey: 2,
-                AVSampleRateKey: 44_100,
-                AVEncoderBitRateKey: 128_000
+                AVSampleRateKey: 48_000
             ]
             let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
             input.expectsMediaDataInRealTime = true
@@ -265,15 +294,6 @@ private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
         guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
         guard writer.status == .writing else { return }
 
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        if !hasStartedSession {
-            // First sample lands; open the writer session at this PTS
-            // so the output timeline starts at zero regardless of how
-            // long the user spent picking a region.
-            writer.startSession(atSourceTime: pts)
-            hasStartedSession = true
-        }
-
         switch type {
         case .screen:
             // Skip blank / idle / suspended frames so the writer's
@@ -287,13 +307,34 @@ private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
                status != .complete {
                 return
             }
+            // Open the writer session on the FIRST complete video
+            // sample (not on audio — audio frequently lands a beat
+            // before video, and starting at the audio PTS would
+            // reject all the video samples whose PTSs come slightly
+            // earlier than the audio's first frame).
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            if !hasStartedSession {
+                writer.startSession(atSourceTime: pts)
+                hasStartedSession = true
+            }
+            // Pull the pixel buffer out and feed it through the
+            // adaptor. This skips whatever SCStream-specific sample
+            // attachments were triggering -12737 inside AVAssetWriter
+            // when we appended the CMSampleBuffer wholesale.
+            guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
             if videoInput.isReadyForMoreMediaData {
-                videoInput.append(sampleBuffer)
+                if !videoAdaptor.append(pixelBuffer, withPresentationTime: pts) {
+                    Logger(subsystem: "com.damioffice.EditOS", category: "ScreenRecorder")
+                        .error("pixel adaptor append failed: \(self.writer.error?.localizedDescription ?? "—", privacy: .public) (status=\(self.writer.status.rawValue))")
+                }
             }
         case .audio, .microphone:
-            if let audioInput, audioInput.isReadyForMoreMediaData {
-                audioInput.append(sampleBuffer)
-            }
+            // Drop audio that arrives before the first video frame —
+            // there's no session to anchor it to yet, and appending
+            // pre-session audio would put `writer.status` into
+            // `.failed`.
+            guard hasStartedSession, let audioInput, audioInput.isReadyForMoreMediaData else { return }
+            audioInput.append(sampleBuffer)
         @unknown default:
             break
         }
@@ -308,7 +349,15 @@ private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
 
     // MARK: Finish
 
-    func finish() async -> URL? {
+    /// Result type carries the URL on success or the writer's error on
+    /// failure, so the coordinator can show a real message instead of
+    /// a generic alert.
+    struct FinishResult {
+        let url: URL?
+        let error: Error?
+    }
+
+    func finish() async -> FinishResult {
         let log = Logger(subsystem: "com.damioffice.EditOS", category: "ScreenRecorder")
 
         // If no samples ever arrived the writer never entered a
@@ -319,26 +368,25 @@ private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
             videoInput.markAsFinished()
             audioInput?.markAsFinished()
             try? FileManager.default.removeItem(at: writer.outputURL)
-            return nil
+            return FinishResult(url: nil, error: NSError(
+                domain: "ScreenRecorder", code: -3,
+                userInfo: [NSLocalizedDescriptionKey: "No frames were captured. ScreenCaptureKit didn't deliver any video samples — check that Screen Recording is granted in System Settings."]
+            ))
         }
         videoInput.markAsFinished()
         audioInput?.markAsFinished()
         await writer.finishWriting()
         log.info("finish: writer.status=\(self.writer.status.rawValue) error=\(self.writer.error?.localizedDescription ?? "—", privacy: .public)")
 
-        // Treat the file as valid if it exists and has real bytes, even
-        // if the writer's status flag came back as something other than
-        // .completed. AVAssetWriter sometimes lands in .failed when an
-        // audio input received no samples, but the video track itself
-        // is perfectly playable. The user just wants their file.
-        let url = writer.outputURL
-        let attrs = (try? FileManager.default.attributesOfItem(atPath: url.path)) ?? [:]
-        let size = (attrs[.size] as? Int64) ?? 0
-        if size > 1024 {
-            return url
+        // Strict success: only return the URL when the writer actually
+        // completed cleanly. A `.failed` status leaves a file with a
+        // partial moov atom that QuickTime and AVFoundation both
+        // refuse to open — better to delete it and tell the user why.
+        if writer.status == .completed {
+            return FinishResult(url: writer.outputURL, error: nil)
         }
-        log.error("finish: output too small (\(size) bytes), discarding")
-        try? FileManager.default.removeItem(at: url)
-        return nil
+        let err = writer.error
+        try? FileManager.default.removeItem(at: writer.outputURL)
+        return FinishResult(url: nil, error: err)
     }
 }

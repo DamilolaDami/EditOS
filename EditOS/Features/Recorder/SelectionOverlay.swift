@@ -81,7 +81,7 @@ struct SelectionOverlay: View {
                     .padding(.top, 24)
                 Spacer()
                 controlsBar
-                    .padding(.bottom, 36)
+                    .padding(.bottom, 56)
             }
         }
         // No outer drag gesture — that was hijacking touches from the
@@ -465,23 +465,16 @@ struct SelectionOverlay: View {
             guard let window = selectedWindow else { return nil }
             return .window(window)
         case .region:
-            // Convert the SwiftUI rectangle into display-local pixels.
-            // SwiftUI inside the overlay uses top-left origin; SCStream
-            // `sourceRect` is also top-left origin in display pixels.
-            // Multiply by the screen's backing scale for the 1:1 map
-            // on a single primary monitor; multi-monitor lives in a
-            // follow-up.
-            guard let screen = NSScreen.main, draftRect.width > 4, draftRect.height > 4 else {
-                return nil
-            }
-            let scale = screen.backingScaleFactor
-            let pixels = CGRect(
-                x: draftRect.minX * scale,
-                y: draftRect.minY * scale,
-                width: draftRect.width * scale,
-                height: draftRect.height * scale
-            )
-            return .region(display, pixels)
+            // SCStreamConfiguration.sourceRect is in display-local
+            // POINTS (not pixels) — the canonical WWDC sample multiplies
+            // only the output width/height by the backing scale, not
+            // sourceRect itself. The previous build pre-scaled the rect
+            // to pixels, which put sourceRect outside the display bounds
+            // on retina, and SCStream produced frames whose actual
+            // dimensions didn't match the writer's expectation — the
+            // writer landed in `.failed` and we got the unplayable file.
+            guard draftRect.width > 4, draftRect.height > 4 else { return nil }
+            return .region(display, draftRect)
         }
     }
 }

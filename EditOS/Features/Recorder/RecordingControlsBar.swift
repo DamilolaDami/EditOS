@@ -67,7 +67,11 @@ struct RecordingControlsBar: View {
             RoundedRectangle(cornerRadius: 22)
                 .stroke(.white.opacity(0.18), lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.35), radius: 16, y: 6)
+        // No shadow. The bar sits over a dim mask during recording; a
+        // shadow on top of a 35%-black overlay reads as a darker
+        // rectangle behind the pill (the "unwanted black rect" the
+        // user spotted). The dim itself provides plenty of separation.
+        .fixedSize()
     }
 
     private var elapsedLabel: String {

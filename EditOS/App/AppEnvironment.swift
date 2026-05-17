@@ -21,6 +21,12 @@ final class AppEnvironment {
     let sparkle: SparkleUpdater
     let recorder: RecorderCoordinator
 
+    /// Wired up from `EditOSApp` so any non-View context (e.g. the
+    /// screen-recorder coordinator's `NSWindow` callbacks) can request
+    /// the SwiftUI scene to open a project window without having
+    /// access to `@Environment(\.openWindow)`.
+    var openProjectInEditor: (UUID) -> Void = { _ in }
+
     /// Container used to build the SwiftData-backed ProjectStore when one
     /// isn't supplied. Wired from `EditOSApp` at startup.
     init(
@@ -57,5 +63,6 @@ final class AppEnvironment {
         // banner, so we centralise it.
         self.sparkle = SparkleUpdater()
         self.recorder = RecorderCoordinator()
+        self.recorder.attach(environment: self)
     }
 }
