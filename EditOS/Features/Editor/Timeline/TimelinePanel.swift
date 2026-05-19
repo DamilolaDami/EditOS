@@ -143,6 +143,7 @@ struct TimelinePanel: View {
                         TimelineRuler(
                             duration: timelineDuration,
                             pixelsPerSecond: pixelsPerSecond,
+                            beats: model.project.timeline.detectedBeats,
                             onScrub: { time in scrub(to: time) }
                         )
                         .contextMenu {

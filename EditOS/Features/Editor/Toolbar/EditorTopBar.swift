@@ -56,15 +56,88 @@ struct EditorTopBar: View {
         }
     }
 
+    /// Live save indicator. Drives copy + colour off `model.saveStatus`,
+    /// and wraps the "Saved 3m ago" branch in a `TimelineView` so the
+    /// relative timestamp ticks forward without anything else having to
+    /// re-render. The chip itself never lays out — its width is steady so
+    /// surrounding controls don't dance every time the status flips.
     private var autoSavedLabel: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 10))
-                .foregroundStyle(theme.colors.success)
-            Text("Auto saved: \(formattedSaveTime)")
-                .font(theme.typography.caption.monospacedDigit())
-                .foregroundStyle(theme.colors.textSecondary)
+        TimelineView(.periodic(from: .now, by: 5)) { ctx in
+            let snapshot = saveSnapshot(at: ctx.date)
+            HStack(spacing: 4) {
+                Image(systemName: snapshot.symbol)
+                    .font(.system(size: 10))
+                    .foregroundStyle(snapshot.tint)
+                Text(snapshot.label)
+                    .font(theme.typography.caption.monospacedDigit())
+                    .foregroundStyle(theme.colors.textSecondary)
+                    .animation(.none, value: snapshot.label)
+            }
+            .help(snapshot.tooltip)
         }
+    }
+
+    private struct SaveSnapshot {
+        let symbol: String
+        let tint: Color
+        let label: String
+        let tooltip: String
+    }
+
+    private func saveSnapshot(at now: Date) -> SaveSnapshot {
+        switch model.saveStatus {
+        case .idle:
+            return SaveSnapshot(
+                symbol: "checkmark.circle.fill",
+                tint: theme.colors.success,
+                label: "Saved",
+                tooltip: "All changes saved"
+            )
+        case .pendingChanges:
+            return SaveSnapshot(
+                symbol: "circle.dotted",
+                tint: theme.colors.warning,
+                label: "Unsaved changes",
+                tooltip: "Saving in a moment…"
+            )
+        case .saving:
+            return SaveSnapshot(
+                symbol: "arrow.triangle.2.circlepath",
+                tint: theme.colors.accent,
+                label: "Saving…",
+                tooltip: "Writing to disk"
+            )
+        case .saved(let when):
+            return SaveSnapshot(
+                symbol: "checkmark.circle.fill",
+                tint: theme.colors.success,
+                label: "Saved \(Self.relativePhrase(for: when, now: now))",
+                tooltip: "Last saved \(Self.absoluteTime(for: when))"
+            )
+        case .error(let message):
+            return SaveSnapshot(
+                symbol: "exclamationmark.triangle.fill",
+                tint: theme.colors.danger,
+                label: "Save failed",
+                tooltip: message
+            )
+        }
+    }
+
+    private static func relativePhrase(for when: Date, now: Date) -> String {
+        let seconds = max(0, now.timeIntervalSince(when))
+        if seconds < 5 { return "just now" }
+        if seconds < 60 { return "\(Int(seconds))s ago" }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 { return "\(minutes)m ago" }
+        let hours = Int(seconds / 3600)
+        return "\(hours)h ago"
+    }
+
+    private static func absoluteTime(for when: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter.string(from: when)
     }
 
     private var rightSideActions: some View {
@@ -237,9 +310,4 @@ struct EditorTopBar: View {
         .help(help)
     }
 
-    private var formattedSaveTime: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter.string(from: model.project.modifiedAt)
-    }
 }

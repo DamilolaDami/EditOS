@@ -83,8 +83,23 @@ private extension Clip.Kind {
 private struct ProjectInspector: View {
     let project: Project
 
+    static let projectInfo = InspectorInfo(
+        title: "Project info",
+        summary: "Top-level metadata for this project — canvas size, frame rate, total timeline duration, and asset count.",
+        steps: [
+            .init(symbol: "rectangle.ratio.16.to.9", title: "Resolution",
+                  body: "Output canvas size. Set from the first imported video's native size, locked thereafter."),
+            .init(symbol: "timer", title: "Frame rate",
+                  body: "Frames per second used by the export pipeline."),
+            .init(symbol: "clock", title: "Duration",
+                  body: "End of the longest track. Updates as you trim or extend clips."),
+            .init(symbol: "tray.full", title: "Assets",
+                  body: "Imported media in this project's library."),
+        ]
+    )
+
     var body: some View {
-        InspectorSection(title: "Project") {
+        InspectorSection(title: "Project", info: Self.projectInfo) {
             InspectorRow(label: "Name", value: project.name)
             InspectorRow(label: "Resolution", value: "\(Int(project.canvas.size.width)) × \(Int(project.canvas.size.height))")
             InspectorRow(label: "Frame rate", value: String(format: "%.2f fps", project.canvas.frameRate))
@@ -98,8 +113,21 @@ private struct ProjectInspector: View {
 
 private struct ClipInspector: View {
     @Environment(\.theme) private var theme
+    @Environment(AppEnvironment.self) private var environment
     @Bindable var model: EditorViewModel
     let clip: Clip
+
+    /// Drives the rough-cut sheet shown for the currently-selected
+    /// media clip. Carries the resolved file URL so the sheet doesn't
+    /// have to re-resolve the security-scoped bookmark itself.
+    @State private var roughCutSource: RoughCutSource?
+
+    struct RoughCutSource: Identifiable {
+        let id = UUID()
+        let url: URL
+        let asset: MediaAsset
+        let duration: TimeInterval
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -116,10 +144,12 @@ private struct ClipInspector: View {
                 filterSection
                 timingSection(showSpeed: false)
             case .media:
+                roughCutSection
                 timingSection(showSpeed: true)
                 speedRampSection
                 transitionSection
                 audioSection
+                beatSection
                 captionsSection
                 transformSection
             }
@@ -128,8 +158,64 @@ private struct ClipInspector: View {
 
     // MARK: - Sections per kind
 
+    /// Rough-cut entry point for media clips. Resolves the underlying
+    /// asset URL on tap and opens the analysis sheet — the sheet
+    /// drives `RoughCutEngine` and reports a curated set of segments
+    /// back, which we drop on a new video track via
+    /// `model.applyRoughCut(segments:sourceAsset:)`.
+    private var roughCutSection: some View {
+        InspectorSection(title: "Rough cut", systemImage: "wand.and.stars", info: Self.roughCutInfo) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Find highlight moments automatically — audio energy + face detection + motion analysis, all on-device.")
+                    .font(theme.typography.caption)
+                    .foregroundStyle(theme.colors.textSecondary)
+                Button {
+                    Task { await openRoughCutSheet() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("Generate rough cut…")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(theme.colors.accent))
+                }
+                .buttonStyle(.plain)
+                .disabled(asset == nil)
+            }
+        }
+        .sheet(item: $roughCutSource) { source in
+            RoughCutSheet(
+                sourceURL: source.url,
+                sourceDisplayName: source.asset.displayName,
+                sourceDuration: source.duration,
+                onApply: { segments in
+                    model.applyRoughCut(segments: segments, sourceAsset: source.asset)
+                }
+            )
+        }
+    }
+
+    private var asset: MediaAsset? {
+        model.project.assets.first { $0.id == clip.assetID }
+    }
+
+    private func openRoughCutSheet() async {
+        guard let asset = self.asset else { return }
+        // Resolve the security-scoped URL once here so the sheet can
+        // run AVAssetReader on it without re-doing the bookmark dance.
+        guard let url = try? await environment.assetResolver.resolve(asset) else { return }
+        let duration = asset.duration
+        await MainActor.run {
+            roughCutSource = RoughCutSource(url: url, asset: asset, duration: duration)
+        }
+    }
+
     private func timingSection(showSpeed: Bool) -> some View {
-        InspectorSection(title: "Timing", systemImage: "clock") {
+        InspectorSection(title: "Timing", systemImage: "clock", info: Self.timingInfo) {
             InspectorRow(label: "Start", value: String(format: "%.2fs", clip.timeRange.start))
             InspectorRow(label: "Duration", value: String(format: "%.2fs", clip.timeRange.duration))
             if showSpeed {
@@ -145,7 +231,7 @@ private struct ClipInspector: View {
     }
 
     private var audioSection: some View {
-        InspectorSection(title: "Audio", systemImage: "speaker.wave.2.fill") {
+        InspectorSection(title: "Audio", systemImage: "speaker.wave.2.fill", info: Self.audioInfo) {
             SliderRow(
                 label: "Volume",
                 value: floatBinding(\.volume),
@@ -190,6 +276,252 @@ private struct ClipInspector: View {
         }
     }
 
+    /// Rhythm / beat-detection entry point. Runs `BeatDetector` over
+    /// the clip's audio and stores the resulting beat positions on the
+    /// timeline so the ruler can draw tick marks and clip-edge drags
+    /// can snap to them. Skipped if the underlying asset has no audio
+    /// track (pure image clip).
+    private var beatSection: some View {
+        let asset = model.project.assets.first { $0.id == clip.assetID }
+        let hasAudio = asset?.kind == .audio || asset?.kind == .video
+        let isDetecting = model.detectingBeatsClipID == clip.id
+        let timeline = model.project.timeline
+        let beatCount = timeline.detectedBeats.count
+        let tempo = timeline.detectedTempo
+
+        return Group {
+            if hasAudio {
+                InspectorSection(title: "Rhythm", systemImage: "metronome", info: Self.rhythmInfo) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Detect beats from this clip's audio so clip edges snap to the rhythm grid and the ruler shows beat ticks.")
+                            .font(theme.typography.caption)
+                            .foregroundStyle(theme.colors.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        HStack(spacing: 8) {
+                            Button {
+                                Task { await model.detectBeats(for: clip.id) }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    if isDetecting {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                            .scaleEffect(0.7)
+                                    } else {
+                                        Image(systemName: "metronome")
+                                            .font(.system(size: 11, weight: .semibold))
+                                    }
+                                    Text(isDetecting ? "Analysing…" : "Detect beats")
+                                        .font(.system(size: 12, weight: .semibold))
+                                }
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Capsule().fill(theme.colors.accent.opacity(isDetecting ? 0.6 : 1.0)))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isDetecting)
+
+                            if beatCount > 0 {
+                                Button("Clear") {
+                                    model.clearDetectedBeats()
+                                }
+                                .font(.system(size: 12, weight: .medium))
+                                .buttonStyle(.plain)
+                                .foregroundStyle(theme.colors.danger)
+                                .disabled(isDetecting)
+                            }
+                        }
+
+                        if beatCount > 0 {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(theme.colors.success)
+                                Text(beatSummary(count: beatCount, tempo: tempo))
+                                    .font(theme.typography.caption.monospacedDigit())
+                                    .foregroundStyle(theme.colors.textSecondary)
+                            }
+                        }
+
+                        if let error = model.lastBeatDetectionError {
+                            Text(error)
+                                .font(theme.typography.caption)
+                                .foregroundStyle(theme.colors.danger)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func beatSummary(count: Int, tempo: Double?) -> String {
+        guard let tempo, tempo > 0 else {
+            return "\(count) beat\(count == 1 ? "" : "s") on the timeline"
+        }
+        return String(format: "%d beats · %.1f BPM", count, tempo)
+    }
+
+    // MARK: - Section info payloads
+    //
+    // Each section's explainer lives here as a static `InspectorInfo`
+    // so the popover content stays close to the section that uses it
+    // without growing per-instance state. The InspectorSection header
+    // renders a shared "ⓘ" button next to the title when one of these
+    // is supplied.
+
+    static let roughCutInfo = InspectorInfo(
+        title: "AI rough cut",
+        summary: "Picks the most interesting seconds of a long clip and stacks them on a new video track.",
+        steps: [
+            .init(symbol: "waveform", title: "Audio energy",
+                  body: "Loud passages (speech, action, impact) score higher."),
+            .init(symbol: "face.smiling", title: "Face presence",
+                  body: "Visible faces boost the surrounding seconds."),
+            .init(symbol: "speedometer", title: "Camera motion",
+                  body: "Settled framing is preferred over whip-pans and shaky hand-held."),
+        ],
+        tip: "Best for clips ≥ 3 minutes. Target output length is configurable in the sheet."
+    )
+
+    static let timingInfo = InspectorInfo(
+        title: "Clip timing",
+        summary: "Where this clip sits on the timeline and how fast it plays.",
+        steps: [
+            .init(symbol: "play.fill", title: "Start",
+                  body: "Position on the timeline. Drag the clip body to move it."),
+            .init(symbol: "ruler", title: "Duration",
+                  body: "How long this clip occupies. Drag its leading or trailing edge to trim."),
+            .init(symbol: "speedometer", title: "Speed",
+                  body: "1× is real-time. Affects both audio and video; neighbours ripple-push on changes."),
+        ]
+    )
+
+    static let audioInfo = InspectorInfo(
+        title: "Audio",
+        summary: "Master gain plus an optional keyframed gain envelope.",
+        steps: [
+            .init(symbol: "speaker.wave.2.fill", title: "Volume",
+                  body: "Scalar gain in 0–100%. 100% is unity."),
+            .init(symbol: "waveform.path", title: "Gain envelope",
+                  body: "Tap the strip to drop keyframes for fades and ducks. Drag diamonds to retime."),
+            .init(symbol: "mic.fill", title: "Voiceover ducking",
+                  body: "Voiceover clips automatically dim music on overlapping ranges."),
+        ],
+        tip: "Right-click a keyframe to delete it."
+    )
+
+    static let rhythmInfo = InspectorInfo(
+        title: "Beat detection",
+        summary: "Find every beat in this clip's audio so clip edges snap to the rhythm grid.",
+        steps: [
+            .init(symbol: "waveform", title: "Analyses the audio",
+                  body: "Runs an on-device FFT pass, finds every beat, and estimates the tempo."),
+            .init(symbol: "circle.fill", title: "Marks the ruler",
+                  body: "Each beat shows up as an accent dot on top of the timeline ruler. Zoom in if crowded."),
+            .init(symbol: "magnet", title: "Snaps your edits",
+                  body: "While Snap is on, dragging or trimming any clip pulls its edge to the nearest beat."),
+        ],
+        tip: "Run Detect Beats on the *music* clip, then drag your B-roll cuts. Edges will magnetise to the downbeat."
+    )
+
+    static let transitionInfo = InspectorInfo(
+        title: "Transition out",
+        summary: "Cross-clip blend between this clip's trailing edge and the next one on the same track.",
+        steps: [
+            .init(symbol: "rectangle.2.swap", title: "Overlap",
+                  body: "The next clip's leading edge overlaps this one by `duration`."),
+            .init(symbol: "scissors", title: "None",
+                  body: "Hard cut. Pick a transition kind to enable the blend."),
+            .init(symbol: "timer", title: "Duration",
+                  body: "Capped to half the shorter clip's length so neither side gets eaten."),
+        ]
+    )
+
+    static let speedRampInfo = InspectorInfo(
+        title: "Speed ramp",
+        summary: "Vary playback speed across the clip with keyframes — slow-mo highlights, time-lapse pans.",
+        steps: [
+            .init(symbol: "plus.circle", title: "Add keyframe",
+                  body: "Tap the curve to drop a new control point."),
+            .init(symbol: "speedometer", title: "Multiplier",
+                  body: "0.1× to 8×. Affects both video and audio."),
+            .init(symbol: "arrow.left.and.right", title: "Drag",
+                  body: "Move keyframes horizontally to retime the curve."),
+        ],
+        tip: "Display duration recomputes from the curve — neighbours ripple-push automatically."
+    )
+
+    static let captionsInfo = InspectorInfo(
+        title: "Auto captions",
+        summary: "Transcribe this clip's audio into caption-track text overlays, on-device.",
+        steps: [
+            .init(symbol: "mic", title: "Speech recognition",
+                  body: "Uses SFSpeechRecognizer — runs locally, no upload."),
+            .init(symbol: "text.bubble", title: "One overlay per phrase",
+                  body: "Each recognised segment becomes its own caption clip on a captions track."),
+            .init(symbol: "scissors", title: "Respects trims",
+                  body: "Segments outside the clip's `sourceRange` are skipped."),
+        ],
+        tip: "Re-running replaces the previous captions for this clip."
+    )
+
+    static let transformInfo = InspectorInfo(
+        title: "Transform",
+        summary: "Position, scale, rotation, and opacity on the project canvas.",
+        steps: [
+            .init(symbol: "arrow.up.left.and.arrow.down.right", title: "Translation",
+                  body: "Slide the clip in canvas space."),
+            .init(symbol: "magnifyingglass", title: "Scale",
+                  body: "1.0 is native size. Above 1 zooms in (may crop)."),
+            .init(symbol: "rotate.left", title: "Rotation",
+                  body: "In degrees, clockwise positive."),
+            .init(symbol: "circle.lefthalf.filled", title: "Opacity",
+                  body: "0 is invisible, 1 is solid. Use for fade-style overlays."),
+        ]
+    )
+
+    static let textInfo = InspectorInfo(
+        title: "Text overlay",
+        summary: "Body content and style for a caption / title clip.",
+        steps: [
+            .init(symbol: "textformat", title: "Body",
+                  body: "What the overlay says."),
+            .init(symbol: "paintpalette", title: "Colour",
+                  body: "Foreground fill colour."),
+            .init(symbol: "textformat.size", title: "Size",
+                  body: "Font size in canvas points."),
+        ],
+        tip: "Pair with an animation preset (typewriter, fade-in, slide-in) for kinetic typography."
+    )
+
+    static let stickerInfo = InspectorInfo(
+        title: "Sticker",
+        summary: "SF Symbol or downloaded image (e.g. a GIPHY GIF) overlaid on the canvas.",
+        steps: [
+            .init(symbol: "face.smiling", title: "Source",
+                  body: "Either an SF Symbol name or a path to a downloaded image."),
+            .init(symbol: "paintpalette", title: "Tint",
+                  body: "Applied to symbol-based stickers only."),
+            .init(symbol: "textformat.size", title: "Size",
+                  body: "Canvas-relative scale in points."),
+        ]
+    )
+
+    static let filterInfo = InspectorInfo(
+        title: "Filter",
+        summary: "Colour-grading preset blended over this clip's pixels.",
+        steps: [
+            .init(symbol: "wand.and.stars", title: "Preset",
+                  body: "Pick from the catalog. Each preset is a Core Image LUT."),
+            .init(symbol: "slider.horizontal.3", title: "Intensity",
+                  body: "0 disables the filter, 1 is full strength. Drag to dial in subtlety."),
+            .init(symbol: "eye", title: "Live preview",
+                  body: "The player updates immediately. Exports use the same pipeline."),
+        ]
+    )
+
     /// Cross-clip transition (crossfade / dip-to-black). Shown only when
     /// this clip has a following clip on the same video track — that's
     /// the adjacency a transition can blend across.
@@ -207,7 +539,7 @@ private struct ClipInspector: View {
 
         return Group {
             if let following, following.kind == .media {
-                InspectorSection(title: "Transition Out", systemImage: "rectangle.2.swap") {
+                InspectorSection(title: "Transition Out", systemImage: "rectangle.2.swap", info: Self.transitionInfo) {
                     HStack(spacing: 6) {
                         TransitionChip(
                             label: "None",
@@ -268,7 +600,7 @@ private struct ClipInspector: View {
             && clip.sourceRange.duration > 0.2
         return Group {
             if canRamp {
-                InspectorSection(title: "Speed Ramp", systemImage: "speedometer") {
+                InspectorSection(title: "Speed Ramp", systemImage: "speedometer", info: Self.speedRampInfo) {
                     let liveClip = currentClip(clip.id) ?? clip
                     let keyframes = liveClip.speedKeyframes ?? []
 
@@ -280,19 +612,37 @@ private struct ClipInspector: View {
 
                     HStack(spacing: 8) {
                         Menu {
+                            // Use Toggle so macOS renders a leading
+                            // checkmark on the active item. The `set:`
+                            // side just routes through applySpeedPreset
+                            // — toggling "off" picks .none, which
+                            // clears the curve.
                             ForEach(SpeedRampPreset.allCases) { preset in
-                                Button {
-                                    model.applySpeedPreset(preset, on: clip.id)
-                                } label: {
+                                Toggle(isOn: Binding(
+                                    get: { liveClip.lastSpeedPreset == preset },
+                                    set: { isOn in
+                                        if isOn {
+                                            model.applySpeedPreset(preset, on: clip.id)
+                                        } else {
+                                            model.applySpeedPreset(.none, on: clip.id)
+                                        }
+                                    }
+                                )) {
                                     Label(preset.displayName, systemImage: preset.systemImage)
                                 }
                             }
                         } label: {
+                            // Button label echoes the active preset so
+                            // the user can tell at a glance which curve
+                            // is on — falls back to "Presets" when no
+                            // ramp is applied yet.
                             HStack(spacing: 4) {
-                                Image(systemName: "wand.and.stars")
+                                Image(systemName: liveClip.lastSpeedPreset?.systemImage ?? "wand.and.stars")
                                     .font(.system(size: 10, weight: .semibold))
-                                Text("Presets")
+                                Text(liveClip.lastSpeedPreset?.displayName ?? "Presets")
                                     .font(.system(size: 11, weight: .medium))
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
                             }
                             .frame(maxWidth: .infinity)
                         }
@@ -356,7 +706,7 @@ private struct ClipInspector: View {
         let supportsCaptions = assetKind == .audio || assetKind == .video
         return Group {
             if supportsCaptions {
-                InspectorSection(title: "Captions", systemImage: "captions.bubble") {
+                InspectorSection(title: "Captions", systemImage: "captions.bubble", info: Self.captionsInfo) {
                     let isTranscribing = model.transcribingClipID == clip.id
                     Button {
                         Task { await model.generateCaptions(for: clip.id) }
@@ -394,7 +744,7 @@ private struct ClipInspector: View {
     }
 
     private var transformSection: some View {
-        InspectorSection(title: "Transform", systemImage: "arrow.up.left.and.arrow.down.right") {
+        InspectorSection(title: "Transform", systemImage: "arrow.up.left.and.arrow.down.right", info: Self.transformInfo) {
             SliderRow(
                 label: "Opacity",
                 value: clipBinding(\.transform.opacity),
@@ -420,7 +770,7 @@ private struct ClipInspector: View {
     }
 
     private var textSection: some View {
-        InspectorSection(title: "Text", systemImage: "textformat") {
+        InspectorSection(title: "Text", systemImage: "textformat", info: Self.textInfo) {
             HStack(alignment: .firstTextBaseline) {
                 Text("Content")
                     .font(.system(size: 12))
@@ -508,7 +858,7 @@ private struct ClipInspector: View {
     }
 
     private var stickerSection: some View {
-        InspectorSection(title: "Sticker", systemImage: "face.smiling") {
+        InspectorSection(title: "Sticker", systemImage: "face.smiling", info: Self.stickerInfo) {
             if clip.stickerImagePath != nil {
                 InspectorRow(label: "Source", value: "GIPHY")
             } else if clip.stickerSymbol != nil {
@@ -532,7 +882,7 @@ private struct ClipInspector: View {
     }
 
     private var filterSection: some View {
-        InspectorSection(title: "Filter", systemImage: "wand.and.stars") {
+        InspectorSection(title: "Filter", systemImage: "wand.and.stars", info: Self.filterInfo) {
             HStack(spacing: 8) {
                 Image(systemName: filterSymbol)
                     .font(.system(size: 13, weight: .semibold))
@@ -778,12 +1128,35 @@ private struct TransitionChip: View {
     }
 }
 
+/// Self-contained explainer payload for an inspector section. Each
+/// section that opts in supplies one of these and `InspectorSection`
+/// renders an "ⓘ" button in the header that opens a popover with the
+/// content. The shape is intentionally rigid (summary + numbered
+/// steps + optional tip) so every section's explainer reads the same.
+struct InspectorInfo {
+    let title: String
+    let summary: String
+    let steps: [Step]
+    var tip: String? = nil
+
+    struct Step {
+        let symbol: String
+        let title: String
+        let body: String
+    }
+}
+
 private struct InspectorSection<Content: View>: View {
     @Environment(\.theme) private var theme
     let title: String
     /// Optional SF Symbol shown beside the section label.
     var systemImage: String? = nil
+    /// Optional explainer popover. When set, the section header grows
+    /// an `ⓘ` button on its trailing edge that toggles the popover.
+    var info: InspectorInfo? = nil
     @ViewBuilder var content: Content
+
+    @State private var showInfo: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacing.sm) {
@@ -797,6 +1170,21 @@ private struct InspectorSection<Content: View>: View {
                     .font(theme.typography.sectionLabel)
                     .foregroundStyle(theme.colors.textTertiary)
                     .tracking(0.8)
+                if let info {
+                    Spacer(minLength: 0)
+                    Button {
+                        showInfo.toggle()
+                    } label: {
+                        Image(systemName: "info.circle")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(theme.colors.textTertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("What is \(info.title)?")
+                    .popover(isPresented: $showInfo, arrowEdge: .trailing) {
+                        InspectorInfoPopover(info: info)
+                    }
+                }
             }
             VStack(alignment: .leading, spacing: theme.spacing.md) {
                 content
@@ -812,6 +1200,63 @@ private struct InspectorSection<Content: View>: View {
                     .stroke(theme.colors.border, lineWidth: 1)
             )
         }
+    }
+}
+
+/// Renders an `InspectorInfo` payload as a compact popover: header,
+/// summary line, then one row per step (symbol + title + body), and
+/// finally an optional accent-tinted tip footer.
+private struct InspectorInfoPopover: View {
+    @Environment(\.theme) private var theme
+    let info: InspectorInfo
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "info.circle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(theme.colors.accent)
+                Text(info.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(theme.colors.textPrimary)
+            }
+
+            Text(info.summary)
+                .font(.system(size: 11))
+                .foregroundStyle(theme.colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(info.steps.enumerated()), id: \.offset) { _, step in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: step.symbol)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(theme.colors.accent)
+                            .frame(width: 16, alignment: .center)
+                            .padding(.top, 2)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(step.title)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(theme.colors.textPrimary)
+                            Text(step.body)
+                                .font(.system(size: 11))
+                                .foregroundStyle(theme.colors.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+
+            if let tip = info.tip {
+                Divider()
+                Text(tip)
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.colors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(14)
+        .frame(width: 280)
     }
 }
 

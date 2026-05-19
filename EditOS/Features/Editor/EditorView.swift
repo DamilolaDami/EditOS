@@ -38,10 +38,18 @@ struct EditorView: View {
         .task(id: model.project.id) {
             await model.reloadComposition()
         }
-        // Persist project edits (trim, move, delete, mute, cover, etc.) — the
-        // model mutates `project` directly so we save whenever it changes.
+        // Persist project edits (trim, move, delete, mute, cover, etc.). The
+        // model coalesces bursts into a single trailing-edge write so a
+        // continuous drag collapses to one disk hit instead of dozens.
         .onChange(of: model.project) { _, newProject in
-            environment.projectStore.update(newProject)
+            model.scheduleSave {
+                environment.projectStore.update(newProject)
+            }
+        }
+        // Flush any in-flight debounced save before the window tears down
+        // so we don't lose the trailing edits inside the debounce window.
+        .onDisappear {
+            model.flushPendingSave()
         }
         .onDeleteCommand {
             Task { await model.deleteSelectedClip() }

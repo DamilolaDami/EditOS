@@ -37,6 +37,13 @@ final class EditorViewModel {
     /// Last user-visible error from a caption pass. Cleared automatically
     /// after the next successful run.
     var lastCaptionError: String? = nil
+    /// Set while a beat-detection pass is running on a given clip — the
+    /// inspector reads this to swap the button label for a spinner +
+    /// disable re-entry on the same clip.
+    var detectingBeatsClipID: Clip.ID? = nil
+    /// Last user-visible error from a beat-detection pass. Cleared on
+    /// the next successful run.
+    var lastBeatDetectionError: String? = nil
     private let resolver: AssetResolver
 
     // MARK: - Undo / Redo
@@ -64,6 +71,68 @@ final class EditorViewModel {
 
     var canUndo: Bool { !undoStack.isEmpty }
     var canRedo: Bool { !redoStack.isEmpty }
+
+    // MARK: - Auto-save
+
+    /// Lifecycle of the project's autosave state. Drives the editor-header
+    /// pill (`Saving…`, `Saved 3s ago`, `Unsaved changes`) and lets test
+    /// fixtures observe whether a flush is still pending without sleeping
+    /// for the debounce window.
+    enum SaveStatus: Equatable, Sendable {
+        case idle
+        case pendingChanges
+        case saving
+        case saved(Date)
+        case error(String)
+    }
+
+    /// Latest save lifecycle state. Read by the top-bar indicator. Tests
+    /// can poll this to wait for a flush without sleeping.
+    private(set) var saveStatus: SaveStatus = .idle
+
+    /// Debounce window — bursts of edits inside this window collapse into
+    /// a single disk write. 0.8s is small enough that a force-quit one
+    /// second after the last edit loses < 1s of work, large enough that a
+    /// fast trim drag doesn't hammer SwiftData on every gesture tick.
+    private let saveDebounce: TimeInterval = 0.8
+
+    private var pendingSaveTask: Task<Void, Never>?
+    /// Latest persist block. Each `scheduleSave` call replaces it so the
+    /// closure that finally runs always uses the freshest `Project`.
+    private var pendingPersist: (@MainActor () -> Void)?
+
+    /// Coalesce a save. Each call cancels any pending flush, marks the
+    /// status as `.pendingChanges`, and schedules `persist` to run on the
+    /// main actor once the debounce settles. Bursts of mutations during a
+    /// drag collapse into a single disk write at the trailing edge.
+    func scheduleSave(persist: @escaping @MainActor () -> Void) {
+        pendingSaveTask?.cancel()
+        pendingPersist = persist
+        saveStatus = .pendingChanges
+        pendingSaveTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: .seconds(self.saveDebounce))
+            guard !Task.isCancelled else { return }
+            self.performPendingSave()
+        }
+    }
+
+    /// Force the pending save to run immediately. Called on window close
+    /// so the user doesn't lose the trailing edits inside the debounce
+    /// window.
+    func flushPendingSave() {
+        pendingSaveTask?.cancel()
+        pendingSaveTask = nil
+        performPendingSave()
+    }
+
+    private func performPendingSave() {
+        guard let persist = pendingPersist else { return }
+        pendingPersist = nil
+        saveStatus = .saving
+        persist()
+        saveStatus = .saved(.now)
+    }
 
     init(project: Project, resolver: AssetResolver) {
         self.project = project
@@ -360,6 +429,45 @@ final class EditorViewModel {
         project.timeline.tracks.append(Track(kind: kind))
     }
 
+    /// Drop a sequence of rough-cut segments onto a fresh video track
+    /// above the current ones. The segments reference the same asset
+    /// the user analysed and are laid out sequentially starting at
+    /// `t=0` — original clip stays untouched on its existing track.
+    /// Returns the new track's ID so callers can highlight or select
+    /// it after creation.
+    @discardableResult
+    func applyRoughCut(
+        segments: [RoughCutEngine.Segment],
+        sourceAsset: MediaAsset,
+        trackName: String = "Rough cut"
+    ) -> Track.ID? {
+        guard !segments.isEmpty else { return nil }
+        recordSnapshot()
+
+        var cursor: TimeInterval = 0
+        let clips: [Clip] = segments.map { seg in
+            let clip = Clip(
+                assetID: sourceAsset.id,
+                timeRange: TimeRange(start: cursor, duration: seg.duration),
+                sourceRange: TimeRange(start: seg.startTime, duration: seg.duration),
+                label: trackName
+            )
+            cursor += seg.duration
+            return clip
+        }
+
+        // Prepend so the rough-cut track sits above the original in
+        // the timeline UI.
+        let newTrack = Track(kind: .video, clips: clips)
+        if let firstVideoIndex = project.timeline.tracks.firstIndex(where: { $0.kind == .video }) {
+            project.timeline.tracks.insert(newTrack, at: firstVideoIndex)
+        } else {
+            project.timeline.tracks.append(newTrack)
+        }
+        Task { await reloadComposition() }
+        return newTrack.id
+    }
+
     /// Remove a track and any composition rebuild that follows. The view
     /// guards against removing the last video track from the UI side.
     func deleteTrack(_ id: Track.ID) {
@@ -571,6 +679,51 @@ final class EditorViewModel {
         } catch {
             lastCaptionError = error.localizedDescription
         }
+    }
+
+    /// Run `BeatDetector` over the clip's source audio and stash the
+    /// detected beats on the timeline. Beats outside the clip's
+    /// `sourceRange` are filtered out — the user trimmed that audio off,
+    /// so it shouldn't show up as a snap target — and the surviving
+    /// beats are mapped from source-local time into project time.
+    func detectBeats(for clipID: Clip.ID) async {
+        guard detectingBeatsClipID == nil else { return }
+        guard let location = locateClip(clipID) else { return }
+        let clip = project.timeline.tracks[location.trackIndex].clips[location.clipIndex]
+        guard let asset = project.assets.first(where: { $0.id == clip.assetID }) else { return }
+        guard asset.kind == .audio || asset.kind == .video else { return }
+
+        detectingBeatsClipID = clipID
+        defer { detectingBeatsClipID = nil }
+        do {
+            let url = try await resolver.resolve(asset)
+            let detector = BeatDetector()
+            let result = try await detector.analyze(url: url)
+            // Source-local → project time mapping. Same shape as the
+            // caption pipeline: anything outside the clip's trimmed
+            // window is dropped, and `clip.timeRange.start` offsets the
+            // rest into the timeline's coordinate space.
+            let sourceStart = clip.sourceRange.start
+            let sourceEnd = clip.sourceRange.end
+            let projectOffset = clip.timeRange.start - sourceStart
+            let beatsInProject = result.beats
+                .filter { $0 >= sourceStart && $0 <= sourceEnd }
+                .map { $0 + projectOffset }
+            recordSnapshot()
+            project.timeline.detectedBeats = beatsInProject.sorted()
+            project.timeline.detectedTempo = result.tempo
+            lastBeatDetectionError = nil
+        } catch {
+            lastBeatDetectionError = error.localizedDescription
+        }
+    }
+
+    /// Wipe any previously-detected beats from the timeline. Undoable.
+    func clearDetectedBeats() {
+        guard !project.timeline.detectedBeats.isEmpty || project.timeline.detectedTempo != nil else { return }
+        recordSnapshot()
+        project.timeline.detectedBeats = []
+        project.timeline.detectedTempo = nil
     }
 
     private struct ClipLocation {
@@ -846,11 +999,15 @@ final class EditorViewModel {
     /// effective display duration and ripple-pushes following clips on
     /// the same track to keep adjacency intact. Pass `nil` to clear the
     /// ramp and fall back to the scalar `speed`.
-    func setSpeedKeyframes(_ keyframes: [SpeedKeyframe]?, on id: Clip.ID) {
+    func setSpeedKeyframes(_ keyframes: [SpeedKeyframe]?, on id: Clip.ID, preset: SpeedRampPreset? = nil) {
         recordSnapshot()
         guard let location = locateClipForSpeedRamp(id) else { return }
         var clip = project.timeline.tracks[location.trackIndex].clips[location.clipIndex]
         clip.speedKeyframes = (keyframes?.isEmpty == false) ? keyframes : nil
+        // Track which preset produced the current curve so the inspector
+        // can mark the right menu item with a checkmark. Clear it on
+        // manual / nil writes — the curve no longer matches a preset.
+        clip.lastSpeedPreset = (clip.speedKeyframes == nil) ? nil : preset
         let newDuration = clip.effectiveDisplayDuration()
         let oldDuration = clip.timeRange.duration
         let delta = newDuration - oldDuration
@@ -878,7 +1035,9 @@ final class EditorViewModel {
         guard let location = locateClipForSpeedRamp(id) else { return }
         let clip = project.timeline.tracks[location.trackIndex].clips[location.clipIndex]
         let keyframes = preset.keyframes(forSourceDuration: clip.sourceRange.duration)
-        setSpeedKeyframes(keyframes, on: id)
+        // `.none` is "reset to 1×" — keyframes() returns nil, the
+        // setter drops the ramp, and lastSpeedPreset clears with it.
+        setSpeedKeyframes(keyframes, on: id, preset: preset == .none ? nil : preset)
     }
 
     private struct ClipPosition {

@@ -131,10 +131,10 @@ struct TimelineTrackRow: View {
     }
 
     /// Times the dragged clip can snap to: timeline origin, the playhead,
-    /// and every other clip's edges across *every* track — so a clip can
-    /// align vertically with a clip on a different lane, not just within its
-    /// own track. The clip view's snap line spans full height already, so
-    /// these targets light it up at the matching x.
+    /// every other clip's edges across *every* track, plus any detected
+    /// beat positions from the rhythm-analysis pass. The clip view's
+    /// snap line spans full height already, so these targets light it
+    /// up at the matching x.
     private func snapCandidates(excluding excludedID: Clip.ID) -> [TimeInterval] {
         var candidates: [TimeInterval] = [0, playheadTime]
         for laneTrack in model.project.timeline.tracks {
@@ -143,6 +143,10 @@ struct TimelineTrackRow: View {
                 candidates.append(other.timeRange.end)
             }
         }
+        // Beat targets — only used when the user has run Detect Beats on
+        // an audio clip. Snap is the same magnetic radius, so clips
+        // gravitate to the beat that's already nearest.
+        candidates.append(contentsOf: model.project.timeline.detectedBeats)
         return candidates
     }
 }

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import AVKit
 import OSLog
@@ -5,6 +6,11 @@ import OSLog
 struct PreviewPanel: View {
     @Environment(\.theme) private var theme
     @Bindable var model: EditorViewModel
+
+    /// Tracks the host window's full-screen state so the toolbar button
+    /// can swap its icon between enter / exit. Updated by AppKit
+    /// notifications because SwiftUI doesn't surface a binding for it.
+    @State private var isWindowFullScreen: Bool = false
 
     var body: some View {
         EditorPanel {
@@ -45,14 +51,54 @@ struct PreviewPanel: View {
                 .background(theme.colors.surfaceElevated, in: Capsule())
             Spacer()
             aspectRatioMenu
-            Button {} label: {
-                Image(systemName: "arrow.up.left.and.arrow.down.right")
+            Button {
+                toggleFullScreen()
+            } label: {
+                Image(systemName: isWindowFullScreen
+                      ? "arrow.down.right.and.arrow.up.left"
+                      : "arrow.up.left.and.arrow.down.right")
             }
             .buttonStyle(.plain)
             .foregroundStyle(theme.colors.textSecondary)
+            .keyboardShortcut("f", modifiers: [.control, .command])
+            .help(isWindowFullScreen ? "Exit full screen (⌃⌘F)" : "Enter full screen (⌃⌘F)")
         }
         .padding(.horizontal, theme.spacing.md)
         .padding(.vertical, theme.spacing.sm)
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { note in
+            // Only react when the notification belongs to *our* window;
+            // multi-window apps can have several editors in different
+            // full-screen states at once.
+            if (note.object as? NSWindow) === hostWindow() {
+                isWindowFullScreen = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { note in
+            if (note.object as? NSWindow) === hostWindow() {
+                isWindowFullScreen = false
+            }
+        }
+        .onAppear {
+            // Seed the icon state from the current window so reopening
+            // an already-fullscreen window doesn't show the wrong glyph.
+            isWindowFullScreen = hostWindow()?.styleMask.contains(.fullScreen) ?? false
+        }
+    }
+
+    /// Toggle macOS full-screen on the window hosting this view. Falls
+    /// back to the key window when the lookup misses (e.g. menu-driven
+    /// invocations before the view has a window yet).
+    private func toggleFullScreen() {
+        let window = hostWindow() ?? NSApp.keyWindow
+        window?.toggleFullScreen(nil)
+    }
+
+    /// Best-effort lookup of the window currently displaying this view.
+    /// SwiftUI doesn't expose a binding, so we fall through key → main
+    /// → first match — good enough for a single-editor-window flow and
+    /// stable enough for the multi-window case in practice.
+    private func hostWindow() -> NSWindow? {
+        NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: \.isVisible)
     }
 
     /// Quick aspect ratio switcher — picks the matching long-edge resolution

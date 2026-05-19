@@ -49,6 +49,12 @@ struct Clip: Identifiable, Hashable, Sendable, Codable {
     /// `multiplier` is the playback rate at that time (e.g. 2.0 = 2×).
     /// Between keyframes the rate interpolates linearly.
     var speedKeyframes: [SpeedKeyframe]? = nil
+    /// Which `SpeedRampPreset` produced the current curve, if any. Set
+    /// when the user picks a preset from the inspector; cleared when
+    /// the ramp is reset. Powers the inspector's "which preset is
+    /// currently applied?" checkmark — the keyframes themselves don't
+    /// carry that identity.
+    var lastSpeedPreset: SpeedRampPreset? = nil
     /// Transition between this clip and the next on the same track.
     /// `nil` means the clips abut with a hard cut. When set, the
     /// composition pipeline overlaps the next clip's leading edge with

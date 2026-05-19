@@ -2,7 +2,7 @@ import Foundation
 
 /// One-tap speed-ramp curves exposed in the inspector. Each preset returns
 /// a list of `SpeedKeyframe`s sized to the host clip's source duration.
-enum SpeedRampPreset: String, CaseIterable, Identifiable, Sendable {
+enum SpeedRampPreset: String, CaseIterable, Identifiable, Hashable, Codable, Sendable {
     case none
     case linearRampUp        // 1× → 2× across the clip
     case linearRampDown      // 2× → 1×
