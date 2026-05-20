@@ -15,6 +15,28 @@
              https://sparkle-project.org/documentation/publishing/ -->
 
         <item>
+            <title>EditOS 1.5</title>
+            <pubDate>Tue, 19 May 2026 16:18:46 +0000</pubDate>
+            <sparkle:version>6</sparkle:version>
+            <sparkle:shortVersionString>1.5</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[
+                <p>Three flagship features land in 1.5:</p>
+                <ul>
+                  <li><strong>AI Rough Cut</strong> — generate a 60-second highlight reel from any long clip; on-device analysis weighs audio energy, faces, and camera motion.</li>
+                  <li><strong>AI Beat Detection</strong> — pure-Swift FFT pipeline detects every beat in an audio clip; the ruler shows beat ticks and clip-edge drags snap to the rhythm grid.</li>
+                  <li><strong>Autosave indicator</strong> — live "Saved 3s ago" pill in the editor top bar; bursts of edits coalesce into a single debounced write.</li>
+                </ul>
+                <p>Plus inspector-wide info popovers, speed-ramp preset checkmarks, and a working fullscreen button (⌃⌘F). See <a href="https://github.com/DamilolaDami/EditOS/releases/tag/v1.5.0">v1.5.0 release notes</a>.</p>
+            ]]></description>
+            <enclosure
+                url="https://github.com/DamilolaDami/EditOS/releases/download/v1.5.0/EditOS-1.5.dmg"
+                sparkle:edSignature="4Ok0wWoJExEVRKeqNMWlgjKbN72JJzYkxxQqfPMo8su0jp/sU6wiffQw3HLvF74xg5xJt4N1aL/kN2QdBLs7Bg=="
+                length="6488536"
+                type="application/octet-stream" />
+        </item>
+
+        <item>
             <title>EditOS 1.4</title>
             <pubDate>Sun, 17 May 2026 01:10:00 +0000</pubDate>
             <sparkle:version>5</sparkle:version>
