@@ -41,6 +41,42 @@ struct FilteredRange: Sendable {
     let intensity: Double
 }
 
+/// Per-layer opacity ramp inside a single instruction. Composition
+/// time runs from `instruction.timeRange.start` to
+/// `instruction.timeRange.end`; the ramp interpolates linearly between
+/// `[startTime, endTime]` *in composition seconds*, holding the
+/// boundary opacities outside that window.
+///
+/// Drives M2's live crossfade: the leading clip's layer gets an
+/// `1.0 → 0.0` ramp across the overlap, the trailing clip's layer
+/// gets `0.0 → 1.0`. Single-layer instructions can omit the ramp
+/// entirely — the layer defaults to opacity 1.0.
+struct OpacityRamp: Sendable {
+    let startOpacity: Float
+    let endOpacity: Float
+    let startTime: TimeInterval
+    let endTime: TimeInterval
+
+    func opacity(at t: TimeInterval) -> Float {
+        guard endTime > startTime else { return endOpacity }
+        if t <= startTime { return startOpacity }
+        if t >= endTime { return endOpacity }
+        let progress = Float((t - startTime) / (endTime - startTime))
+        return startOpacity + (endOpacity - startOpacity) * progress
+    }
+}
+
+/// Per-layer metadata inside an `EditorCompositionInstruction`. One
+/// entry per active source track in this instruction's time range.
+/// Layers composite in the order they appear in the array (first =
+/// back, last = front).
+struct LayerInstruction: Sendable {
+    let trackID: CMPersistentTrackID
+    /// Optional opacity envelope. Nil = constant 1.0 (typical for
+    /// solo ranges).
+    let opacityRamp: OpacityRamp?
+}
+
 /// Overlay (text / sticker / animated) pre-rendered into the canvas
 /// coordinate space. Multi-frame overlays (GIFs / text animations)
 /// pick the right frame via `image(at:)` based on local time.
@@ -169,22 +205,43 @@ final class EditorCompositor: NSObject, AVVideoCompositing {
 
         let t = request.compositionTime.seconds
 
-        // Source layer (M1: single track). Pull the frame via the
-        // instruction's first declared source track ID. Missing source
-        // is normal — happens during padded tails or between-clip gaps
-        // — and we fall back to the canvas-coloured fallback.
+        // Source layers. Composite each from back to front, multiplying
+        // by the layer's opacity ramp at this time. M2 lets one
+        // instruction declare multiple layers (typical: two for a
+        // crossfade range); M1 used a single layer at full opacity.
+        // Missing source per layer is normal — happens during padded
+        // tails or between-clip gaps — and we just skip that layer.
         var result = safeFallback
-        if let trackIDValue = instruction.requiredSourceTrackIDs?.first,
-           let trackID = (trackIDValue as? NSNumber)?.int32Value,
-           let buffer = request.sourceFrame(byTrackID: trackID) {
+        for layer in instruction.layers {
+            guard let buffer = request.sourceFrame(byTrackID: layer.trackID) else { continue }
             let raw = CIImage(cvPixelBuffer: buffer)
-            result = renderSourceLayer(
+            var positioned = renderSourceLayer(
                 raw,
                 at: t,
                 instruction: instruction,
                 canvasSize: canvasSize,
                 safeFallback: safeFallback
             )
+
+            // Multiply by per-layer opacity. Skipped when the layer
+            // has no ramp (constant 1.0) to avoid the extra CIColorMatrix
+            // pass on solo frames.
+            if let ramp = layer.opacityRamp {
+                let alpha = max(0, min(1, ramp.opacity(at: t)))
+                if alpha < 0.999 {
+                    let matrix = CIFilter.colorMatrix()
+                    matrix.inputImage = positioned
+                    matrix.aVector = CIVector(x: 0, y: 0, z: 0, w: CGFloat(alpha))
+                    if let dim = matrix.outputImage, Self.isValid(dim) {
+                        positioned = dim
+                    }
+                }
+            }
+
+            let composited = positioned.composited(over: result)
+            if Self.isValid(composited) {
+                result = composited
+            }
         }
 
         // Fades / dip transitions — same ramped-alpha overlay
@@ -385,10 +442,14 @@ final class EditorCompositionInstruction: NSObject, AVVideoCompositionInstructio
     let fades: [FadeRange]
     let filters: [FilteredRange]
     let overlays: [OverlayInstance]
+    /// Per-layer instructions. Composited bottom-up. Single-layer
+    /// instructions (solo clip ranges) emit one entry with a nil
+    /// opacityRamp; crossfade ranges emit two with ramped opacity.
+    let layers: [LayerInstruction]
 
     init(
         timeRange: CMTimeRange,
-        trackIDs: [CMPersistentTrackID],
+        layers: [LayerInstruction],
         canvasSize: CGSize,
         clipTransforms: [ClipVideoTransform],
         fades: [FadeRange],
@@ -396,7 +457,8 @@ final class EditorCompositionInstruction: NSObject, AVVideoCompositionInstructio
         overlays: [OverlayInstance]
     ) {
         self.timeRange = timeRange
-        self.requiredSourceTrackIDs = trackIDs.map { NSNumber(value: $0) }
+        self.layers = layers
+        self.requiredSourceTrackIDs = layers.map { NSNumber(value: $0.trackID) }
         self.canvasSize = canvasSize
         self.clipTransforms = clipTransforms
         self.fades = fades

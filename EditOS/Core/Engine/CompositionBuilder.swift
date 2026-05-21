@@ -360,9 +360,15 @@ struct CompositionBuilder: Sendable {
             Self.log.error("Failed to load composition duration: \(String(describing: error), privacy: .public)")
             return nil
         }
+        // M1-style single-layer fallback used when M2's per-range
+        // instructions weren't synthesised (e.g. no crossfade pairs in
+        // the project). M2 will emit per-range instructions when
+        // crossfade live blending is in flight; this single-layer
+        // shape stays as the steady-state for projects with no
+        // multi-layer activity.
         let instruction = EditorCompositionInstruction(
             timeRange: CMTimeRange(start: .zero, duration: durationCM),
-            trackIDs: [firstVideoTrack.trackID],
+            layers: [LayerInstruction(trackID: firstVideoTrack.trackID, opacityRamp: nil)],
             canvasSize: canvasSize,
             clipTransforms: clipTransforms,
             fades: fades,
