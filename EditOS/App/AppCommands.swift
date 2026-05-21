@@ -7,6 +7,15 @@ struct AppCommands: Commands {
     @Environment(\.openWindow) private var openWindow
     @FocusedValue(\.editorModel) private var editorModel
 
+    /// Shortcut lookup helper. Touching `environment.shortcuts.binding(for:)`
+    /// inside the commands body wires the menu rebuild into the
+    /// `@Observable` store — when the user rebinds an action in
+    /// Settings → Shortcuts, every affected menu item picks up the
+    /// new combo without an app restart.
+    private func shortcut(_ action: ShortcutAction) -> KeyboardShortcut {
+        environment.shortcuts.swiftUIShortcut(for: action)
+    }
+
     var body: some Commands {
         // Wrapping the app-menu Check-for-Updates and the File menu
         // pair in a Group keeps us under the CommandsBuilder arity
@@ -21,10 +30,13 @@ struct AppCommands: Commands {
 
             CommandGroup(replacing: .newItem) {
                 Button("New Project") {
-                    let project = environment.projectStore.createProject(named: "Untitled")
+                    let project = environment.projectStore.createProject(
+                        named: "Untitled",
+                        canvas: environment.preferences.defaultCanvasFormat()
+                    )
                     openWindow(id: WindowID.editor.rawValue, value: project.id)
                 }
-                .keyboardShortcut("n", modifiers: .command)
+                .keyboardShortcut(shortcut(.newProject))
             }
         }
 
@@ -56,20 +68,20 @@ struct AppCommands: Commands {
             Button("Show Projects Window") {
                 openWindow(id: WindowID.home.rawValue)
             }
-            .keyboardShortcut("0", modifiers: [.command, .shift])
+            .keyboardShortcut(shortcut(.showProjectsWindow))
         }
 
         CommandGroup(replacing: .undoRedo) {
             Button("Undo") {
                 editorModel?.undo()
             }
-            .keyboardShortcut("z", modifiers: .command)
+            .keyboardShortcut(shortcut(.undo))
             .disabled(!(editorModel?.canUndo ?? false))
 
             Button("Redo") {
                 editorModel?.redo()
             }
-            .keyboardShortcut("z", modifiers: [.command, .shift])
+            .keyboardShortcut(shortcut(.redo))
             .disabled(!(editorModel?.canRedo ?? false))
         }
 
@@ -79,25 +91,25 @@ struct AppCommands: Commands {
             Button("Cut") {
                 if let editorModel { Task { await editorModel.cutSelection() } }
             }
-            .keyboardShortcut("x", modifiers: .command)
+            .keyboardShortcut(shortcut(.cut))
             .disabled(editorModel?.selectedClipIDs.isEmpty ?? true)
 
             Button("Copy") {
                 editorModel?.copySelection()
             }
-            .keyboardShortcut("c", modifiers: .command)
+            .keyboardShortcut(shortcut(.copy))
             .disabled(editorModel?.selectedClipIDs.isEmpty ?? true)
 
             Button("Paste") {
                 if let editorModel { Task { await editorModel.paste() } }
             }
-            .keyboardShortcut("v", modifiers: .command)
+            .keyboardShortcut(shortcut(.paste))
             .disabled(!(editorModel?.hasClipboard ?? false))
 
             Button("Duplicate") {
                 if let editorModel { Task { await editorModel.duplicateSelection() } }
             }
-            .keyboardShortcut("d", modifiers: .command)
+            .keyboardShortcut(shortcut(.duplicate))
             .disabled(editorModel?.selectedClipIDs.isEmpty ?? true)
         }
 
@@ -107,13 +119,13 @@ struct AppCommands: Commands {
             Button("Select All Clips") {
                 editorModel?.selectAllClips()
             }
-            .keyboardShortcut("a", modifiers: .command)
+            .keyboardShortcut(shortcut(.selectAll))
             .disabled(editorModel == nil)
 
             Button("Deselect All") {
                 editorModel?.selectClip(nil)
             }
-            .keyboardShortcut("a", modifiers: [.command, .shift])
+            .keyboardShortcut(shortcut(.deselectAll))
             .disabled(editorModel?.selectedClipIDs.isEmpty ?? true)
         }
 
@@ -129,7 +141,7 @@ struct AppCommands: Commands {
                     editorModel.zoom = min(4.0, editorModel.zoom * 1.25)
                 }
             }
-            .keyboardShortcut("=", modifiers: .command)
+            .keyboardShortcut(shortcut(.zoomIn))
             .disabled(editorModel == nil)
 
             Button("Zoom Out Timeline") {
@@ -137,13 +149,13 @@ struct AppCommands: Commands {
                     editorModel.zoom = max(0.25, editorModel.zoom * 0.8)
                 }
             }
-            .keyboardShortcut("-", modifiers: .command)
+            .keyboardShortcut(shortcut(.zoomOut))
             .disabled(editorModel == nil)
 
             Button("Reset Timeline Zoom") {
                 editorModel?.zoom = 1.0
             }
-            .keyboardShortcut("0", modifiers: .command)
+            .keyboardShortcut(shortcut(.resetZoom))
             .disabled(editorModel == nil)
 
             Divider()
@@ -151,7 +163,7 @@ struct AppCommands: Commands {
             Button(editorModel?.snapEnabled == false ? "Enable Snap" : "Disable Snap") {
                 editorModel?.snapEnabled.toggle()
             }
-            .keyboardShortcut("s", modifiers: [.command, .shift])
+            .keyboardShortcut(shortcut(.toggleSnap))
             .disabled(editorModel == nil)
 
             Divider()
@@ -159,32 +171,44 @@ struct AppCommands: Commands {
             Button("Toggle Library") {
                 NotificationCenter.default.post(name: .editorToggleLibrary, object: nil)
             }
-            .keyboardShortcut("l", modifiers: [.command, .option])
+            .keyboardShortcut(shortcut(.toggleLibrary))
             .disabled(editorModel == nil)
 
             Button("Toggle Inspector") {
                 NotificationCenter.default.post(name: .editorToggleInspector, object: nil)
             }
-            .keyboardShortcut("i", modifiers: [.command, .option])
+            .keyboardShortcut(shortcut(.toggleInspector))
             .disabled(editorModel == nil)
+
+            Divider()
+
+            // Workspace presets (#64). Rendered as a flat list under
+            // View — Apple's HIG prefers shallow menus, and these
+            // shortcuts are common enough that hiding them in a
+            // submenu would punish the muscle-memory user.
+            workspaceMenuItem("Editing Workspace", .editing, action: .workspaceEditing)
+            workspaceMenuItem("Color Workspace", .color, action: .workspaceColor)
+            workspaceMenuItem("Audio Workspace", .audio, action: .workspaceAudio)
+            workspaceMenuItem("Effects Workspace", .effects, action: .workspaceEffects)
+            workspaceMenuItem("Full Preview Workspace", .fullPreview, action: .workspaceFullPreview)
         }
 
         CommandMenu("Library") {
-            tabButton("Media", "1", to: .media)
-            tabButton("Audio", "2", to: .audio)
-            tabButton("Text", "3", to: .text)
-            tabButton("Stickers", "4", to: .stickers)
-            tabButton("Filters", "5", to: .filters)
-            tabButton("Captions", "6", to: .captions)
-            tabButton("Effects", "7", to: .effects)
-            tabButton("Transitions", "8", to: .transitions)
+            tabButton("Media", .libraryMedia, to: .media)
+            tabButton("Audio", .libraryAudio, to: .audio)
+            tabButton("Text", .libraryText, to: .text)
+            tabButton("Stickers", .libraryStickers, to: .stickers)
+            tabButton("Filters", .libraryFilters, to: .filters)
+            tabButton("Captions", .libraryCaptions, to: .captions)
+            tabButton("Effects", .libraryEffects, to: .effects)
+            tabButton("Transitions", .libraryTransitions, to: .transitions)
         }
 
         CommandMenu("Playback") {
             Button(editorModel?.playback.isPlaying == true ? "Pause" : "Play") {
                 editorModel?.playback.togglePlayback()
             }
-            .keyboardShortcut(.space, modifiers: [])
+            .keyboardShortcut(shortcut(.togglePlayback))
             .disabled(editorModel == nil)
 
             Divider()
@@ -192,25 +216,25 @@ struct AppCommands: Commands {
             Button("Step Back 1 Frame") {
                 editorModel?.stepFrame(by: -1)
             }
-            .keyboardShortcut(.leftArrow, modifiers: [])
+            .keyboardShortcut(shortcut(.stepBack))
             .disabled(editorModel == nil)
 
             Button("Step Forward 1 Frame") {
                 editorModel?.stepFrame(by: 1)
             }
-            .keyboardShortcut(.rightArrow, modifiers: [])
+            .keyboardShortcut(shortcut(.stepForward))
             .disabled(editorModel == nil)
 
             Button("Back 1 Second") {
                 editorModel?.stepSeconds(by: -1)
             }
-            .keyboardShortcut(.leftArrow, modifiers: .shift)
+            .keyboardShortcut(shortcut(.back1s))
             .disabled(editorModel == nil)
 
             Button("Forward 1 Second") {
                 editorModel?.stepSeconds(by: 1)
             }
-            .keyboardShortcut(.rightArrow, modifiers: .shift)
+            .keyboardShortcut(shortcut(.forward1s))
             .disabled(editorModel == nil)
 
             Divider()
@@ -218,13 +242,13 @@ struct AppCommands: Commands {
             Button("Go to Start") {
                 editorModel?.playback.seek(to: 0)
             }
-            .keyboardShortcut(.upArrow, modifiers: .command)
+            .keyboardShortcut(shortcut(.goToStart))
             .disabled(editorModel == nil)
 
             Button("Go to End") {
                 editorModel?.playback.seek(to: editorModel?.playback.duration ?? 0)
             }
-            .keyboardShortcut(.downArrow, modifiers: .command)
+            .keyboardShortcut(shortcut(.goToEnd))
             .disabled(editorModel == nil)
         }
 
@@ -234,7 +258,7 @@ struct AppCommands: Commands {
                     Task { await editorModel.splitClipAtPlayhead() }
                 }
             }
-            .keyboardShortcut("b", modifiers: .command)
+            .keyboardShortcut(shortcut(.splitAtPlayhead))
             .disabled(editorModel == nil)
 
             Button("Mute / Unmute") {
@@ -242,7 +266,7 @@ struct AppCommands: Commands {
                     editorModel.toggleClipMuted(id)
                 }
             }
-            .keyboardShortcut("m", modifiers: .command)
+            .keyboardShortcut(shortcut(.toggleMute))
             .disabled(editorModel?.selectedClipID == nil)
 
             Divider()
@@ -252,7 +276,7 @@ struct AppCommands: Commands {
                     Task { await editorModel.deleteSelectedClip() }
                 }
             }
-            .keyboardShortcut(.delete, modifiers: [])
+            .keyboardShortcut(shortcut(.deleteClip))
             .disabled(editorModel?.selectedClipIDs.isEmpty ?? true)
 
             Button("Ripple Delete") {
@@ -260,7 +284,7 @@ struct AppCommands: Commands {
                     Task { await editorModel.rippleDeleteSelectedClip() }
                 }
             }
-            .keyboardShortcut(.delete, modifiers: .shift)
+            .keyboardShortcut(shortcut(.rippleDelete))
             .disabled(editorModel?.selectedClipID == nil)
         }
 
@@ -271,7 +295,7 @@ struct AppCommands: Commands {
                 Button("Add Marker at Playhead") {
                     editorModel?.addMarkerAtPlayhead()
                 }
-                .keyboardShortcut("m", modifiers: [])
+                .keyboardShortcut(shortcut(.addMarker))
                 .disabled(editorModel == nil)
 
                 Divider()
@@ -285,7 +309,7 @@ struct AppCommands: Commands {
                         model.playback.seek(to: previous.time)
                     }
                 }
-                .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                .keyboardShortcut(shortcut(.prevMarker))
                 .disabled(editorModel?.project.timeline.markers.isEmpty ?? true)
 
                 Button("Jump to Next Marker") {
@@ -297,7 +321,7 @@ struct AppCommands: Commands {
                         model.playback.seek(to: next.time)
                     }
                 }
-                .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+                .keyboardShortcut(shortcut(.nextMarker))
                 .disabled(editorModel?.project.timeline.markers.isEmpty ?? true)
 
                 Divider()
@@ -332,11 +356,26 @@ struct AppCommands: Commands {
     }
 
     @ViewBuilder
-    private func tabButton(_ title: String, _ shortcut: String, to tool: ToolCategory) -> some View {
+    private func tabButton(_ title: String, _ action: ShortcutAction, to tool: ToolCategory) -> some View {
         Button(title) {
             editorModel?.selectedTool = tool
         }
-        .keyboardShortcut(KeyEquivalent(Character(shortcut)), modifiers: .command)
+        .keyboardShortcut(shortcut(action))
+        .disabled(editorModel == nil)
+    }
+
+    @ViewBuilder
+    private func workspaceMenuItem(
+        _ title: String,
+        _ workspace: Workspace,
+        action: ShortcutAction
+    ) -> some View {
+        Button(title) {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                editorModel?.applyWorkspace(workspace)
+            }
+        }
+        .keyboardShortcut(shortcut(action))
         .disabled(editorModel == nil)
     }
 }

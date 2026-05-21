@@ -142,7 +142,7 @@ struct EditorTopBar: View {
 
     private var rightSideActions: some View {
         HStack(spacing: theme.spacing.xs) {
-            iconButton(systemImage: "rectangle.split.2x1", help: "Layout") {}
+            workspacePicker
             iconButton(systemImage: "doc.text", help: "Notes") {}
 
             Divider().frame(height: 16)
@@ -152,6 +152,50 @@ struct EditorTopBar: View {
             exportButton
                 .padding(.trailing, theme.spacing.sm)
         }
+    }
+
+    /// Workspace switcher (#64). The chip shows the active workspace's
+    /// icon + name; the menu lists all five layouts with the active
+    /// one checkmarked via `Toggle` — the macOS-native pattern. Each
+    /// selection routes through `applyWorkspace` inside `withAnimation`
+    /// so the side panels slide rather than snap.
+    private var workspacePicker: some View {
+        Menu {
+            ForEach(Workspace.allCases) { workspace in
+                Toggle(isOn: Binding(
+                    get: { model.currentWorkspace == workspace },
+                    // Always re-apply on click — clicking the active
+                    // workspace is the "snap back to defaults" gesture,
+                    // so we ignore the toggle's notion of on/off.
+                    set: { _ in
+                        withAnimation(.easeInOut(duration: 0.22)) {
+                            model.applyWorkspace(workspace)
+                        }
+                    }
+                )) {
+                    Label(workspace.displayName, systemImage: workspace.systemImage)
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: model.currentWorkspace.systemImage)
+                    .font(.system(size: 11, weight: .semibold))
+                    // `.symbolEffect(.replace)` morphs between SF
+                    // symbols when `systemName` changes; relies on
+                    // identity preservation, so no `.id()` here.
+                    .contentTransition(.symbolEffect(.replace))
+                Text(model.currentWorkspace.displayName)
+                    .font(theme.typography.caption)
+            }
+            .foregroundStyle(theme.colors.textSecondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(theme.colors.surfaceElevated, in: RoundedRectangle(cornerRadius: 5))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Workspace · ⌃1–5")
     }
 
     private var proButton: some View {

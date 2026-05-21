@@ -41,9 +41,18 @@ struct CompositionBuilder: Sendable {
         // collect per-clip transforms below and apply them in the
         // CIFilter handler. `applyingCIFiltersWithHandler` reads from a
         // single track, so multiple tracks would leave the others black.
-        var sharedVideoTrack: AVMutableCompositionTrack?
+        //
+        // M2: now we run a custom AVVideoCompositing (`EditorCompositor`)
+        // and need TWO composition video tracks so crossfade pairs can
+        // overlap on different layers. Allocation is computed up-front
+        // by `planVideoTrackAllocation` based on the project's transition
+        // graph; non-crossfade neighbours stay on the same track to
+        // minimise track switches.
+        var videoTracks: [AVMutableCompositionTrack] = []
         var clipTransforms: [ClipVideoTransform] = []
         var audioParams: [AVMutableAudioMixInputParameters] = []
+
+        let trackAllocation = Self.planVideoTrackAllocation(project: project)
 
         // Collect every visible (track, clip) pair, then insert in chronological
         // order so insertTimeRange's auto-push doesn't re-arrange already-placed
@@ -55,6 +64,19 @@ struct CompositionBuilder: Sendable {
             }
         }
         entries.sort { $0.clip.timeRange.start < $1.clip.timeRange.start }
+
+        // Crossfade pre-pass (#1) — for each adjacent pair of video
+        // clips on the same track that's marked for a `.crossfade`
+        // transition, pre-render the blend into a cached .mov via
+        // TransitionCache. We then trim half of `transition.duration`
+        // off each clip's composition contribution and slot the
+        // rendered .mov into the gap, so the live render gets a true
+        // pixel blend without needing a custom AVVideoCompositing.
+        //
+        // Dip-to-black / dip-to-white still go through the existing
+        // veil path in the CIFilter handler — they don't need the
+        // multi-source machinery and the veil already nails the look.
+        let crossfadePlan = await Self.planCrossfades(project: project, assetResolver: assetResolver)
 
         // Track which audio mix params belong to voiceover clips so we can
         // skip ducking them (a voiceover doesn't duck itself).
@@ -72,19 +94,41 @@ struct CompositionBuilder: Sendable {
             do {
                 let url = try await assetResolver.resolve(asset)
                 let countBefore = audioParams.count
+                let leadingTrim = crossfadePlan.leadingTrim[clip.id] ?? 0
+                let trailingTrim = crossfadePlan.trailingTrim[clip.id] ?? 0
+                let targetTrackIndex = trackAllocation[clip.id] ?? 0
                 try await insertClip(
                     clip,
                     asset: AVURLAsset(url: url),
                     kind: entry.kind,
                     isMuted: entry.isMuted,
                     into: composition,
-                    sharedVideoTrack: &sharedVideoTrack,
+                    videoTracks: &videoTracks,
+                    targetTrackIndex: targetTrackIndex,
                     clipTransforms: &clipTransforms,
-                    audioParams: &audioParams
+                    audioParams: &audioParams,
+                    leadingTrim: leadingTrim,
+                    trailingTrim: trailingTrim
                 )
                 if clip.isVoiceover, audioParams.count > countBefore,
                    let last = audioParams.last {
                     voiceoverParamIDs.insert(ObjectIdentifier(last))
+                }
+                // If this is the leading clip of a crossfade pair, drop
+                // the cached transition .mov into the gap immediately
+                // after — order matters because the next clip's
+                // insertTimeRange will pick up at the track's end.
+                if let insert = crossfadePlan.transitionAfter[clip.id] {
+                    // M2 step 2: the cache .mov continues to be inserted
+                    // on the leading clip's allocated track. Step 3 will
+                    // replace this cache insert with live opacity-ramp
+                    // blending when source handles exist.
+                    try await Self.appendTransitionMov(
+                        insert: insert,
+                        into: composition,
+                        videoTracks: &videoTracks,
+                        targetTrackIndex: targetTrackIndex
+                    )
                 }
             } catch {
                 Self.log.error("Failed to insert clip \(clip.id, privacy: .public) (\(asset.displayName, privacy: .public)): \(String(describing: error), privacy: .public)")
@@ -138,7 +182,7 @@ struct CompositionBuilder: Sendable {
         Self.padCompositionToFullTimeline(
             composition: composition,
             project: project,
-            sharedVideoTrack: sharedVideoTrack
+            videoTracks: videoTracks
         )
 
         // After padding, the last A/V clip's stretched frame holds through
@@ -174,17 +218,6 @@ struct CompositionBuilder: Sendable {
         )
     }
 
-    /// Per-clip preferredTransform record. Used by the CIFilter handler to
-    /// orient each clip's raw source pixels correctly without setting a
-    /// single transform on the shared video track (which would force every
-    /// clip into the first clip's orientation).
-    struct ClipVideoTransform: Sendable {
-        let start: TimeInterval
-        let end: TimeInterval
-        let transform: CGAffineTransform
-        let naturalSize: CGSize
-    }
-
     /// Builds the master `AVVideoComposition` that drives both playback and
     /// export. Three things happen per frame:
     ///   1. The source video is aspect-fit centered into the project's
@@ -213,35 +246,8 @@ struct CompositionBuilder: Sendable {
         // Pre-build overlay CIImages with canvas positions baked in. Done
         // up-front so the per-frame hot path is just composite calls — never
         // disk I/O, never string rasterisation. Animated GIFs return a
-        // multi-frame `RenderedOverlay`; the handler picks the right frame
-        // based on `compositionTime - clip.start`.
-        struct OverlayInstance: Sendable {
-            let start: TimeInterval
-            let end: TimeInterval
-            let frames: [CIImage]
-            let durations: [TimeInterval]
-            /// GIFs and animated stickers loop forever — text animations
-            /// don't. When `loops == false`, the playhead latches onto
-            /// the final frame once the durations are exhausted instead
-            /// of wrapping back to frame 0.
-            let loops: Bool
-
-            func image(at localTime: TimeInterval) -> CIImage? {
-                guard let first = frames.first else { return nil }
-                guard frames.count > 1, !durations.isEmpty else { return first }
-                let loop = durations.reduce(0, +)
-                guard loop > 0 else { return first }
-                let t = loops
-                    ? localTime.truncatingRemainder(dividingBy: loop)
-                    : min(localTime, loop)
-                var elapsed: TimeInterval = 0
-                for (i, d) in durations.enumerated() {
-                    elapsed += d
-                    if t < elapsed { return frames[i] }
-                }
-                return frames.last
-            }
-        }
+        // multi-frame `RenderedOverlay`; the compositor picks the right
+        // frame based on `compositionTime - clip.start`.
         var overlays: [OverlayInstance] = []
         for track in project.timeline.tracks where !track.isHidden {
             // Only render overlay-style tracks; video / audio / filter
@@ -263,18 +269,9 @@ struct CompositionBuilder: Sendable {
             }
         }
 
-        // Snapshot fade-in / fade-out ranges per video clip so the handler
-        // can ramp opacity to / from black without walking the project tree.
-        struct FadeRange: Sendable {
-            let start: TimeInterval
-            let end: TimeInterval
-            let kind: FadeKind
-            /// RGB triplet (0…1) for the colour to dip *through*. Defaults
-            /// to black for `fadeIn` / `fadeOut`; transitions may override
-            /// to white (`dipToWhite`).
-            let dipColor: (r: Double, g: Double, b: Double)
-            enum FadeKind: Sendable { case `in`, out }
-        }
+        // Snapshot fade-in / fade-out ranges per video clip so the
+        // compositor can ramp opacity to / from black without walking
+        // the project tree on each frame.
         var fades: [FadeRange] = []
         for track in project.timeline.tracks where track.kind == .video && !track.isHidden {
             for clip in track.clips {
@@ -298,15 +295,17 @@ struct CompositionBuilder: Sendable {
             }
         }
 
-        // Cross-clip transitions are rendered as a back-to-back dip-out /
-        // dip-in pair around the cut. A true pixel-blended crossfade needs
-        // a custom `AVVideoCompositing` implementation (tracked as a
-        // follow-up); the dip path uses the existing single-track opacity
-        // ramp infrastructure and still reads as a smooth transition.
+        // Cross-clip dip transitions are rendered as a back-to-back
+        // dip-out / dip-in pair around the cut. `.crossfade` pairs are
+        // handled separately in the pre-render pass above — they get a
+        // true pixel-blended `.mov` slotted into the timeline so we
+        // skip them here (otherwise we'd composite a dip on top of an
+        // already-blended frame).
         for track in project.timeline.tracks where track.kind == .video && !track.isHidden {
             let sortedClips = track.clips.sorted { $0.timeRange.start < $1.timeRange.start }
             for (idx, clip) in sortedClips.enumerated() {
                 guard let transition = clip.transitionToNext else { continue }
+                guard transition.kind != .crossfade else { continue }
                 guard idx + 1 < sortedClips.count else { continue }
                 let next = sortedClips[idx + 1]
 
@@ -324,8 +323,9 @@ struct CompositionBuilder: Sendable {
 
                 let dipColor: (Double, Double, Double)
                 switch transition.kind {
-                case .crossfade, .dipToBlack: dipColor = (0, 0, 0)
-                case .dipToWhite:             dipColor = (1, 1, 1)
+                case .dipToBlack: dipColor = (0, 0, 0)
+                case .dipToWhite: dipColor = (1, 1, 1)
+                case .crossfade:  continue   // handled by the cache
                 }
 
                 // Outgoing leg: clip's last `half` seconds ramp to dipColor.
@@ -347,12 +347,6 @@ struct CompositionBuilder: Sendable {
 
         // Filter ranges — dedicated `.filter` tracks plus the legacy
         // per-video-clip filterPreset for older projects.
-        struct FilteredRange: Sendable {
-            let start: TimeInterval
-            let end: TimeInterval
-            let presetID: String
-            let intensity: Double
-        }
         var filters: [FilteredRange] = []
         for track in project.timeline.tracks where !track.isHidden {
             guard track.kind == .filter || track.kind == .video else { continue }
@@ -367,170 +361,53 @@ struct CompositionBuilder: Sendable {
             }
         }
 
-        let bgColor = CIColor(red: 0, green: 0, blue: 0, alpha: 1)
-        let canvasRect = CGRect(origin: .zero, size: canvasSize)
         let frameRate = max(1.0, project.canvas.frameRate)
 
+        // #65 M1: per-frame work moved into `EditorCompositor`. We
+        // build a single `EditorCompositionInstruction` covering the
+        // whole composition (M2 step 3 will split per time range);
+        // wire the custom compositor class and return a manually-built
+        // `AVMutableVideoComposition`.
+        //
+        // `videoTracks` (loaded above off the asset) already gives us
+        // every video track on the AVAsset — when the caller passes
+        // an AVMutableComposition (which is-a AVAsset), that includes
+        // both step-2-allocated composition tracks.
+        guard !videoTracks.isEmpty else { return nil }
+        let durationCM: CMTime
         do {
-            // Use the mutable variant so we can override `renderSize` and
-            // `frameDuration` after construction — the read-only base type
-            // exposes them get-only.
-            let videoComp = try await AVMutableVideoComposition.videoComposition(with: asset) { request in
-                // Every frame ends here. The handler is best-effort: if any
-                // single composite step produces a degenerate image we
-                // drop back to a known-good fallback and still call finish.
-                // AVAsynchronousCIImageFilteringRequest.finish(with:)
-                // asserts `filteredImage != nil`, so the *last* line of
-                // defence is `safeFallback` — a freshly-built black canvas
-                // built fresh per frame so its lifetime is never in doubt.
-                let safeFallback = CIImage(color: bgColor).cropped(to: canvasRect)
-
-                func isValid(_ image: CIImage) -> Bool {
-                    let e = image.extent
-                    return !e.isNull
-                        && !e.isInfinite
-                        && !e.isEmpty
-                        && e.width > 0
-                        && e.height > 0
-                        && e.width.isFinite
-                        && e.height.isFinite
-                        && e.origin.x.isFinite
-                        && e.origin.y.isFinite
-                }
-
-                let t = request.compositionTime.seconds
-                let raw = request.sourceImage
-                let hasUsableSource = isValid(raw)
-
-                // Apply the active clip's source preferredTransform so
-                // portrait / landscape / rotated sources render in their
-                // intended orientation. Skipped entirely when the source
-                // frame has no usable extent (padded tail / between-clip
-                // gap) — there's nothing to orient.
-                var result = safeFallback
-                if hasUsableSource {
-                    let oriented: CIImage
-                    if let active = clipTransforms.first(where: { t >= $0.start && t < $0.end }) {
-                        let transformed = raw.transformed(by: active.transform)
-                        if isValid(transformed) {
-                            let bounds = transformed.extent
-                            let translated = transformed.transformed(by: CGAffineTransform(
-                                translationX: -bounds.origin.x,
-                                y: -bounds.origin.y
-                            ))
-                            oriented = isValid(translated) ? translated : raw
-                        } else {
-                            oriented = raw
-                        }
-                    } else {
-                        oriented = raw
-                    }
-
-                    let sourceExtent = oriented.extent
-                    let sourceSize = sourceExtent.size
-
-                    // Aspect-fit the source into the canvas. Guard the
-                    // divisor against degenerate dimensions.
-                    let safeWidth = max(1, sourceSize.width)
-                    let safeHeight = max(1, sourceSize.height)
-                    let scale = min(
-                        canvasSize.width / safeWidth,
-                        canvasSize.height / safeHeight
-                    )
-                    let scaledW = sourceSize.width * scale
-                    let scaledH = sourceSize.height * scale
-                    let tx = (canvasSize.width - scaledW) / 2 - sourceExtent.origin.x * scale
-                    let ty = (canvasSize.height - scaledH) / 2 - sourceExtent.origin.y * scale
-                    if scale.isFinite && tx.isFinite && ty.isFinite {
-                        var positioned = oriented
-                            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-                            .transformed(by: CGAffineTransform(translationX: tx, y: ty))
-
-                        // Apply active filter (if any) to the positioned
-                        // video only, so filter effects don't bleed into
-                        // the canvas background.
-                        if let active = filters.first(where: { t >= $0.start && t < $0.end }) {
-                            let filtered = FilterCatalog.apply(
-                                presetID: active.presetID,
-                                intensity: active.intensity,
-                                to: positioned
-                            )
-                            if isValid(filtered) {
-                                positioned = filtered
-                            }
-                        }
-
-                        if isValid(positioned) {
-                            let composited = positioned.composited(over: safeFallback)
-                            if isValid(composited) {
-                                result = composited
-                            }
-                        }
-                    }
-                }
-
-                // Fade / transition — coloured overlay with ramped alpha.
-                // The same machinery handles fadeIn/Out *and* cross-clip
-                // transitions (rendered as a dip-through-color for V1; a
-                // true pixel-blended crossfade is tracked separately).
-                // Multiple fades may overlap (e.g. one clip's transition
-                // out at the same time as another's transition in on a
-                // different track) so we composite each in turn.
-                for fade in fades where t >= fade.start && t < fade.end {
-                    let span = max(0.001, fade.end - fade.start)
-                    let progress = (t - fade.start) / span
-                    let alpha: Double = fade.kind == .in
-                        ? max(0, 1 - progress)
-                        : max(0, progress)
-                    guard alpha > 0.001 else { continue }
-                    let veilColor = CIColor(
-                        red: fade.dipColor.r,
-                        green: fade.dipColor.g,
-                        blue: fade.dipColor.b
-                    )
-                    let baseVeil = CIImage(color: veilColor).cropped(to: canvasRect)
-                    let matrix = CIFilter.colorMatrix()
-                    matrix.inputImage = baseVeil
-                    matrix.aVector = CIVector(x: 0, y: 0, z: 0, w: alpha)
-                    if let veil = matrix.outputImage, isValid(veil) {
-                        let veiled = veil.composited(over: result)
-                        if isValid(veiled) {
-                            result = veiled
-                        }
-                    }
-                }
-
-                // Overlays — text + stickers active at this timestamp.
-                for overlay in overlays where t >= overlay.start && t < overlay.end {
-                    let localTime = t - overlay.start
-                    guard let frame = overlay.image(at: localTime), isValid(frame) else { continue }
-                    let composited = frame.composited(over: result)
-                    if isValid(composited) {
-                        result = composited
-                    }
-                }
-
-                // Final crop. If anything along the way left us with a
-                // degenerate image, fall back to the always-valid fresh
-                // black canvas. We *never* want to hand AVFoundation a
-                // nil-backed image — it asserts filteredImage != nil and
-                // tears the process down.
-                let final: CIImage
-                if isValid(result) {
-                    let cropped = result.cropped(to: canvasRect)
-                    final = isValid(cropped) ? cropped : safeFallback
-                } else {
-                    final = safeFallback
-                }
-                request.finish(with: final, context: nil)
-            }
-            videoComp.renderSize = canvasSize
-            videoComp.frameDuration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
-            return videoComp
+            durationCM = try await asset.load(.duration)
         } catch {
-            Self.log.error("Failed to build video composition: \(String(describing: error), privacy: .public)")
+            Self.log.error("Failed to load composition duration: \(String(describing: error), privacy: .public)")
             return nil
         }
+        // Every video composition track gets a layer so the compositor
+        // can see all of them. Most frames will have content on only
+        // one track (alternating allocation from step 2 puts crossfade
+        // pairs on different tracks but they don't overlap in time
+        // while the cache `.mov` still fills the gap). Step 3 will
+        // emit per-time-range instructions with proper opacity ramps;
+        // until then this single-instruction fallback at constant
+        // opacity 1.0 keeps every track visible at the right time.
+        let allLayers: [LayerInstruction] = videoTracks.map {
+            LayerInstruction(trackID: $0.trackID, opacityRamp: nil)
+        }
+        let instruction = EditorCompositionInstruction(
+            timeRange: CMTimeRange(start: .zero, duration: durationCM),
+            layers: allLayers,
+            canvasSize: canvasSize,
+            clipTransforms: clipTransforms,
+            fades: fades,
+            filters: filters,
+            overlays: overlays
+        )
+
+        let videoComp = AVMutableVideoComposition()
+        videoComp.customVideoCompositorClass = EditorCompositor.self
+        videoComp.instructions = [instruction]
+        videoComp.renderSize = canvasSize
+        videoComp.frameDuration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
+        return videoComp
     }
 
     // MARK: - Overlay rasterisation
@@ -894,22 +771,29 @@ struct CompositionBuilder: Sendable {
     private static func padCompositionToFullTimeline(
         composition: AVMutableComposition,
         project: Project,
-        sharedVideoTrack: AVMutableCompositionTrack?
+        videoTracks: [AVMutableCompositionTrack]
     ) {
         let timelineEnd = CMTime(seconds: project.timeline.duration, preferredTimescale: 600)
         let currentEnd = composition.duration
         guard CMTimeCompare(timelineEnd, currentEnd) > 0 else { return }
         let padDuration = CMTimeSubtract(timelineEnd, currentEnd)
 
-        // Stretch the trailing microframe of the shared video track to
-        // cover the gap. Holding the last frame on-screen is a much more
-        // reliable way to extend composition.duration than
+        // Stretch the trailing microframe of whichever video track ends
+        // latest to cover the gap. Holding the last frame on-screen is
+        // a much more reliable way to extend composition.duration than
         // `insertEmptyTimeRange`, which is documented to extend a track
-        // only when it already has an edit at the insertion point and is
-        // routinely flaky in practice. Audio tracks are independent and
-        // untouched.
-        if let shared = sharedVideoTrack,
-           CMTimeCompare(shared.timeRange.duration, .zero) > 0 {
+        // only when it already has an edit at the insertion point and
+        // is routinely flaky in practice. Audio tracks are independent
+        // and untouched.
+        let latest = videoTracks
+            .filter { CMTimeCompare($0.timeRange.duration, .zero) > 0 }
+            .max(by: {
+                CMTimeCompare(
+                    CMTimeAdd($0.timeRange.start, $0.timeRange.duration),
+                    CMTimeAdd($1.timeRange.start, $1.timeRange.duration)
+                ) < 0
+            })
+        if let shared = latest {
             let microSlice = CMTime(value: 1, timescale: 600) // ~1.6ms
             let trackEnd = CMTimeAdd(shared.timeRange.start, shared.timeRange.duration)
             if CMTimeCompare(shared.timeRange.duration, microSlice) > 0 {
@@ -948,27 +832,72 @@ struct CompositionBuilder: Sendable {
         kind: Track.Kind,
         isMuted: Bool,
         into composition: AVMutableComposition,
-        sharedVideoTrack: inout AVMutableCompositionTrack?,
+        videoTracks: inout [AVMutableCompositionTrack],
+        targetTrackIndex: Int,
         clipTransforms: inout [ClipVideoTransform],
-        audioParams: inout [AVMutableAudioMixInputParameters]
+        audioParams: inout [AVMutableAudioMixInputParameters],
+        leadingTrim: TimeInterval = 0,
+        trailingTrim: TimeInterval = 0
     ) async throws {
-        let startCMTime = CMTime(seconds: clip.timeRange.start, preferredTimescale: 600)
-        let sourceCMRange = clip.sourceRange.cmTimeRange
-        let displayDuration = CMTime(seconds: clip.timeRange.duration, preferredTimescale: 600)
-        let needsScale = abs(clip.timeRange.duration - clip.sourceRange.duration) > 0.001
-        let speedSegments = Self.speedSegments(for: clip)
+        // Crossfade transitions trim a slice off each side of the cut
+        // (composition-side, not model-side). `leadingTrim` /
+        // `trailingTrim` are in *timeline* seconds; we map them through
+        // the clip's uniform speed ratio to the corresponding source
+        // window so a 2× clip's trim costs half as much source.
+        // Speed-ramp + crossfade are V1-incompatible — the segmented
+        // inserter doesn't honour trims yet — so we fall back to a
+        // single insert whenever trim is active.
+        let timelineDur = max(0.001, clip.timeRange.duration)
+        let sourceDur = max(0.001, clip.sourceRange.duration)
+        let speedRatio = sourceDur / timelineDur
+        let requestedTrim = leadingTrim + trailingTrim
+        let safeTrim = min(
+            requestedTrim,
+            max(0, min(timelineDur, sourceDur) - 0.05)
+        )
+        let effectiveLeading: TimeInterval
+        let effectiveTrailing: TimeInterval
+        if requestedTrim > 0.0001, safeTrim < requestedTrim {
+            // Clamped — proportion both ends so the centre of the trim
+            // stays where the user asked.
+            effectiveLeading = leadingTrim * (safeTrim / requestedTrim)
+            effectiveTrailing = safeTrim - effectiveLeading
+        } else {
+            effectiveLeading = leadingTrim
+            effectiveTrailing = trailingTrim
+        }
+
+        let leadingSourceTrim = effectiveLeading * speedRatio
+        let trailingSourceTrim = effectiveTrailing * speedRatio
+        let startCMTime = CMTime(seconds: clip.timeRange.start + effectiveLeading, preferredTimescale: 600)
+        let sourceCMRange = CMTimeRange(
+            start: CMTime(seconds: clip.sourceRange.start + leadingSourceTrim, preferredTimescale: 600),
+            duration: CMTime(seconds: sourceDur - leadingSourceTrim - trailingSourceTrim, preferredTimescale: 600)
+        )
+        let displayDuration = CMTime(seconds: timelineDur - safeTrim, preferredTimescale: 600)
+        let needsScale = abs(displayDuration.seconds - sourceCMRange.duration.seconds) > 0.001
+        let speedSegments = (safeTrim > 0.001) ? nil : Self.speedSegments(for: clip)
 
         // Video — only for non-audio tracks.
         if kind != .audio {
-            let videoTracks = try await asset.loadTracks(withMediaType: .video)
+            let assetVideoTracks = try await asset.loadTracks(withMediaType: .video)
 
-            if let sourceVideo = videoTracks.first {
-                if sharedVideoTrack == nil {
-                    sharedVideoTrack = composition.addMutableTrack(
+            if let sourceVideo = assetVideoTracks.first {
+                // Materialise composition tracks lazily up to the target
+                // index. We add at most 2 tracks today (M2 needs index 0
+                // and 1); M3 will extend this for PIP / overlay lanes.
+                while videoTracks.count <= targetTrackIndex {
+                    if let track = composition.addMutableTrack(
                         withMediaType: .video,
                         preferredTrackID: kCMPersistentTrackID_Invalid
-                    )
+                    ) {
+                        videoTracks.append(track)
+                    } else {
+                        break
+                    }
                 }
+                guard videoTracks.indices.contains(targetTrackIndex) else { return }
+                let destinationTrack = videoTracks[targetTrackIndex]
 
                 if let segments = speedSegments {
                     // Speed ramp: insert each piecewise sub-segment and
@@ -979,25 +908,28 @@ struct CompositionBuilder: Sendable {
                         segments: segments,
                         clip: clip,
                         sourceTrack: sourceVideo,
-                        compositionTrack: sharedVideoTrack,
+                        compositionTrack: destinationTrack,
                         compositionStart: startCMTime
                     )
                 } else {
-                    try sharedVideoTrack?.insertTimeRange(sourceCMRange, of: sourceVideo, at: startCMTime)
+                    try destinationTrack.insertTimeRange(sourceCMRange, of: sourceVideo, at: startCMTime)
                     if needsScale {
                         let insertedRange = CMTimeRange(start: startCMTime, duration: sourceCMRange.duration)
-                        sharedVideoTrack?.scaleTimeRange(insertedRange, toDuration: displayDuration)
+                        destinationTrack.scaleTimeRange(insertedRange, toDuration: displayDuration)
                     }
                 }
 
                 // Snapshot this clip's source preferredTransform + natural
                 // size so the CIFilter handler can orient its frames
-                // correctly.
+                // correctly. When crossfade trim is in play, narrow the
+                // range to the clip's composition contribution so the
+                // handler doesn't try to apply this clip's transform to
+                // the cached transition .mov frames that occupy the gap.
                 let transform = try await sourceVideo.load(.preferredTransform)
                 let natural = try await sourceVideo.load(.naturalSize)
                 clipTransforms.append(ClipVideoTransform(
-                    start: clip.timeRange.start,
-                    end: clip.timeRange.end,
+                    start: clip.timeRange.start + effectiveLeading,
+                    end: clip.timeRange.end - effectiveTrailing,
                     transform: transform,
                     naturalSize: natural
                 ))
@@ -1126,6 +1058,208 @@ struct CompositionBuilder: Sendable {
             }
         }
         return last.multiplier
+    }
+
+    // MARK: - Track allocation (#65 M2)
+
+    /// Assigns each video clip to a composition video-track index (0 or
+    /// 1) so adjacent crossfade pairs end up on different tracks. A
+    /// classic two-colouring of the clip sequence: same colour as
+    /// predecessor unless the predecessor's `transitionToNext` is a
+    /// crossfade *and* the clips abut, in which case we flip.
+    ///
+    /// Audio / overlay / caption / sticker / filter tracks aren't
+    /// returned here — those don't share the video lanes. They're not
+    /// looked up via this map and continue to allocate their own
+    /// composition tracks lazily inside `insertClip`.
+    fileprivate static func planVideoTrackAllocation(project: Project) -> [Clip.ID: Int] {
+        var allocation: [Clip.ID: Int] = [:]
+        for track in project.timeline.tracks where track.kind == .video && !track.isHidden {
+            let sorted = track.clips.sorted { $0.timeRange.start < $1.timeRange.start }
+            var lastTrack = 0
+            for (idx, clip) in sorted.enumerated() {
+                if idx == 0 {
+                    allocation[clip.id] = 0
+                    lastTrack = 0
+                    continue
+                }
+                let prev = sorted[idx - 1]
+                let prevTrack = allocation[prev.id] ?? 0
+                let abuts = abs(clip.timeRange.start - prev.timeRange.end) < 0.1
+                if let transition = prev.transitionToNext,
+                   transition.kind == .crossfade,
+                   abuts {
+                    lastTrack = 1 - prevTrack
+                } else {
+                    lastTrack = prevTrack
+                }
+                allocation[clip.id] = lastTrack
+            }
+        }
+        return allocation
+    }
+
+    // MARK: - Crossfade pre-render (issue #1)
+
+    /// Composition-side instructions for one crossfade pair. The lead
+    /// clip's tail is trimmed by `duration / 2`, the trail clip's head
+    /// by the same amount, and the cached `.mov` slots into the
+    /// resulting gap.
+    fileprivate struct CrossfadePlan: Sendable {
+        var leadingTrim: [Clip.ID: TimeInterval] = [:]
+        var trailingTrim: [Clip.ID: TimeInterval] = [:]
+        /// Keyed by the *leading* clip's ID — produced right after the
+        /// leading clip is inserted into the composition.
+        var transitionAfter: [Clip.ID: TransitionInsert] = [:]
+    }
+
+    fileprivate struct TransitionInsert: Sendable {
+        let url: URL
+        let compositionStart: TimeInterval
+        let duration: TimeInterval
+    }
+
+    /// Walk every visible video track, identify adjacent crossfade
+    /// pairs, render their transitions via `TransitionCache` (in
+    /// parallel via a task group), and return a `CrossfadePlan` keyed
+    /// by clip ID. Pairs that fail to render fall back to no trim — the
+    /// existing dip-veil path picks them up.
+    fileprivate static func planCrossfades(
+        project: Project,
+        assetResolver: AssetResolver
+    ) async -> CrossfadePlan {
+        var pairs: [(lead: Clip, trail: Clip, duration: TimeInterval)] = []
+        for track in project.timeline.tracks where !track.isHidden && track.kind == .video {
+            let sorted = track.clips.sorted { $0.timeRange.start < $1.timeRange.start }
+            for (idx, lead) in sorted.enumerated() {
+                guard let transition = lead.transitionToNext,
+                      transition.kind == .crossfade else { continue }
+                guard idx + 1 < sorted.count else { continue }
+                let trail = sorted[idx + 1]
+                // Only render true crossfades when the clips actually
+                // abut — gaps would need a dip-through-canvas which is
+                // the veil path's job.
+                guard abs(trail.timeRange.start - lead.timeRange.end) < 0.1 else { continue }
+                // Clamp so the rendered transition can't be longer than
+                // half of either clip's source — matches the existing
+                // veil-path clamp so swapping kinds doesn't change the
+                // visible duration.
+                let safeDuration = min(
+                    transition.duration,
+                    lead.sourceRange.duration,
+                    trail.sourceRange.duration
+                )
+                guard safeDuration > 0.05 else { continue }
+                pairs.append((lead, trail, safeDuration))
+            }
+        }
+        guard !pairs.isEmpty else { return CrossfadePlan() }
+
+        // Render in parallel — each transition's I/O is independent.
+        // Results join into the plan in any order; the keying by clip
+        // ID makes that safe.
+        var plan = CrossfadePlan()
+        await withTaskGroup(of: (Clip.ID, Clip.ID, TimeInterval, URL?).self) { group in
+            for pair in pairs {
+                let lead = pair.lead
+                let trail = pair.trail
+                let duration = pair.duration
+                group.addTask {
+                    let url = await renderTransition(
+                        lead: lead,
+                        trail: trail,
+                        duration: duration,
+                        project: project,
+                        assetResolver: assetResolver
+                    )
+                    return (lead.id, trail.id, duration, url)
+                }
+            }
+            for await (leadID, trailID, duration, url) in group {
+                guard let url else { continue }
+                // Find lead clip again to get its timeline end — the
+                // pair tuple isn't captured here because TaskGroup's
+                // result is a value type.
+                let leadTimelineEnd = pairs.first { $0.lead.id == leadID }?.lead.timeRange.end ?? 0
+                let half = duration / 2
+                plan.leadingTrim[trailID] = half
+                plan.trailingTrim[leadID] = half
+                plan.transitionAfter[leadID] = TransitionInsert(
+                    url: url,
+                    compositionStart: leadTimelineEnd - half,
+                    duration: duration
+                )
+            }
+        }
+        return plan
+    }
+
+    /// Render the transition for one pair. Returns nil on any failure
+    /// so the caller can fall through to the dip path — a broken
+    /// transition shouldn't break the whole composition build.
+    private static func renderTransition(
+        lead: Clip,
+        trail: Clip,
+        duration: TimeInterval,
+        project: Project,
+        assetResolver: AssetResolver
+    ) async -> URL? {
+        guard
+            let leadAsset = project.assets.first(where: { $0.id == lead.assetID }),
+            let trailAsset = project.assets.first(where: { $0.id == trail.assetID })
+        else { return nil }
+        do {
+            let leadURL = try await assetResolver.resolve(leadAsset)
+            let trailURL = try await assetResolver.resolve(trailAsset)
+            let request = TransitionCache.Request(
+                leadURL: leadURL,
+                trailURL: trailURL,
+                leadEndSeconds: lead.sourceRange.end,
+                trailStartSeconds: trail.sourceRange.start,
+                duration: duration,
+                canvasSize: project.canvas.size,
+                frameRate: project.canvas.frameRate,
+                kind: .crossfade
+            )
+            return try await TransitionCache.shared.transitionURL(for: request)
+        } catch {
+            Self.log.error("Crossfade render failed (lead=\(lead.id.uuidString, privacy: .public)): \(String(describing: error), privacy: .public)")
+            return nil
+        }
+    }
+
+    /// Append a rendered transition `.mov` onto the leading clip's
+    /// composition track at the planned composition time. Pulled out
+    /// so the main loop stays readable.
+    fileprivate static func appendTransitionMov(
+        insert: TransitionInsert,
+        into composition: AVMutableComposition,
+        videoTracks: inout [AVMutableCompositionTrack],
+        targetTrackIndex: Int
+    ) async throws {
+        let asset = AVURLAsset(url: insert.url)
+        let assetTracks = try await asset.loadTracks(withMediaType: .video)
+        guard let track = assetTracks.first else { return }
+        while videoTracks.count <= targetTrackIndex {
+            if let newTrack = composition.addMutableTrack(
+                withMediaType: .video,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ) {
+                videoTracks.append(newTrack)
+            } else {
+                return
+            }
+        }
+        guard videoTracks.indices.contains(targetTrackIndex) else { return }
+        let destination = videoTracks[targetTrackIndex]
+        let assetDuration = try await asset.load(.duration).seconds
+        let actualDuration = min(assetDuration, insert.duration)
+        let range = CMTimeRange(
+            start: .zero,
+            duration: CMTime(seconds: actualDuration, preferredTimescale: 600)
+        )
+        let at = CMTime(seconds: insert.compositionStart, preferredTimescale: 600)
+        try destination.insertTimeRange(range, of: track, at: at)
     }
 
     fileprivate static func insertSpeedRampedSegments(

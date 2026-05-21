@@ -58,7 +58,7 @@ struct HomeView: View {
                         }
                         .frame(maxWidth: .infinity)
                         CreateProjectBanner(compact: true) {
-                            let project = environment.projectStore.createProject(named: "Untitled")
+                            let project = environment.projectStore.createProject(named: "Untitled", canvas: environment.preferences.defaultCanvasFormat())
                             environment.recentProjects.recordOpen(project.id)
                             openWindow(id: WindowID.editor.rawValue, value: project.id)
                         }
@@ -66,7 +66,7 @@ struct HomeView: View {
                     }
                 } else {
                     CreateProjectBanner(compact: false) {
-                        let project = environment.projectStore.createProject(named: "Untitled")
+                        let project = environment.projectStore.createProject(named: "Untitled", canvas: environment.preferences.defaultCanvasFormat())
                         environment.recentProjects.recordOpen(project.id)
                         openWindow(id: WindowID.editor.rawValue, value: project.id)
                     }
@@ -119,7 +119,7 @@ struct HomeView: View {
                 hasCompletedOnboarding = true
                 isOnboardingPresented = false
                 if shouldCreate {
-                    let project = environment.projectStore.createProject(named: "Untitled")
+                    let project = environment.projectStore.createProject(named: "Untitled", canvas: environment.preferences.defaultCanvasFormat())
                     environment.recentProjects.recordOpen(project.id)
                     openWindow(id: WindowID.editor.rawValue, value: project.id)
                 }
