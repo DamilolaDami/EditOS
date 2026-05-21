@@ -41,9 +41,18 @@ struct CompositionBuilder: Sendable {
         // collect per-clip transforms below and apply them in the
         // CIFilter handler. `applyingCIFiltersWithHandler` reads from a
         // single track, so multiple tracks would leave the others black.
-        var sharedVideoTrack: AVMutableCompositionTrack?
+        //
+        // M2: now we run a custom AVVideoCompositing (`EditorCompositor`)
+        // and need TWO composition video tracks so crossfade pairs can
+        // overlap on different layers. Allocation is computed up-front
+        // by `planVideoTrackAllocation` based on the project's transition
+        // graph; non-crossfade neighbours stay on the same track to
+        // minimise track switches.
+        var videoTracks: [AVMutableCompositionTrack] = []
         var clipTransforms: [ClipVideoTransform] = []
         var audioParams: [AVMutableAudioMixInputParameters] = []
+
+        let trackAllocation = Self.planVideoTrackAllocation(project: project)
 
         // Collect every visible (track, clip) pair, then insert in chronological
         // order so insertTimeRange's auto-push doesn't re-arrange already-placed
@@ -87,13 +96,15 @@ struct CompositionBuilder: Sendable {
                 let countBefore = audioParams.count
                 let leadingTrim = crossfadePlan.leadingTrim[clip.id] ?? 0
                 let trailingTrim = crossfadePlan.trailingTrim[clip.id] ?? 0
+                let targetTrackIndex = trackAllocation[clip.id] ?? 0
                 try await insertClip(
                     clip,
                     asset: AVURLAsset(url: url),
                     kind: entry.kind,
                     isMuted: entry.isMuted,
                     into: composition,
-                    sharedVideoTrack: &sharedVideoTrack,
+                    videoTracks: &videoTracks,
+                    targetTrackIndex: targetTrackIndex,
                     clipTransforms: &clipTransforms,
                     audioParams: &audioParams,
                     leadingTrim: leadingTrim,
@@ -108,10 +119,15 @@ struct CompositionBuilder: Sendable {
                 // after — order matters because the next clip's
                 // insertTimeRange will pick up at the track's end.
                 if let insert = crossfadePlan.transitionAfter[clip.id] {
+                    // M2 step 2: the cache .mov continues to be inserted
+                    // on the leading clip's allocated track. Step 3 will
+                    // replace this cache insert with live opacity-ramp
+                    // blending when source handles exist.
                     try await Self.appendTransitionMov(
                         insert: insert,
                         into: composition,
-                        sharedVideoTrack: &sharedVideoTrack
+                        videoTracks: &videoTracks,
+                        targetTrackIndex: targetTrackIndex
                     )
                 }
             } catch {
@@ -166,7 +182,7 @@ struct CompositionBuilder: Sendable {
         Self.padCompositionToFullTimeline(
             composition: composition,
             project: project,
-            sharedVideoTrack: sharedVideoTrack
+            videoTracks: videoTracks
         )
 
         // After padding, the last A/V clip's stretched frame holds through
@@ -745,22 +761,29 @@ struct CompositionBuilder: Sendable {
     private static func padCompositionToFullTimeline(
         composition: AVMutableComposition,
         project: Project,
-        sharedVideoTrack: AVMutableCompositionTrack?
+        videoTracks: [AVMutableCompositionTrack]
     ) {
         let timelineEnd = CMTime(seconds: project.timeline.duration, preferredTimescale: 600)
         let currentEnd = composition.duration
         guard CMTimeCompare(timelineEnd, currentEnd) > 0 else { return }
         let padDuration = CMTimeSubtract(timelineEnd, currentEnd)
 
-        // Stretch the trailing microframe of the shared video track to
-        // cover the gap. Holding the last frame on-screen is a much more
-        // reliable way to extend composition.duration than
+        // Stretch the trailing microframe of whichever video track ends
+        // latest to cover the gap. Holding the last frame on-screen is
+        // a much more reliable way to extend composition.duration than
         // `insertEmptyTimeRange`, which is documented to extend a track
-        // only when it already has an edit at the insertion point and is
-        // routinely flaky in practice. Audio tracks are independent and
-        // untouched.
-        if let shared = sharedVideoTrack,
-           CMTimeCompare(shared.timeRange.duration, .zero) > 0 {
+        // only when it already has an edit at the insertion point and
+        // is routinely flaky in practice. Audio tracks are independent
+        // and untouched.
+        let latest = videoTracks
+            .filter { CMTimeCompare($0.timeRange.duration, .zero) > 0 }
+            .max(by: {
+                CMTimeCompare(
+                    CMTimeAdd($0.timeRange.start, $0.timeRange.duration),
+                    CMTimeAdd($1.timeRange.start, $1.timeRange.duration)
+                ) < 0
+            })
+        if let shared = latest {
             let microSlice = CMTime(value: 1, timescale: 600) // ~1.6ms
             let trackEnd = CMTimeAdd(shared.timeRange.start, shared.timeRange.duration)
             if CMTimeCompare(shared.timeRange.duration, microSlice) > 0 {
@@ -799,7 +822,8 @@ struct CompositionBuilder: Sendable {
         kind: Track.Kind,
         isMuted: Bool,
         into composition: AVMutableComposition,
-        sharedVideoTrack: inout AVMutableCompositionTrack?,
+        videoTracks: inout [AVMutableCompositionTrack],
+        targetTrackIndex: Int,
         clipTransforms: inout [ClipVideoTransform],
         audioParams: inout [AVMutableAudioMixInputParameters],
         leadingTrim: TimeInterval = 0,
@@ -846,15 +870,24 @@ struct CompositionBuilder: Sendable {
 
         // Video — only for non-audio tracks.
         if kind != .audio {
-            let videoTracks = try await asset.loadTracks(withMediaType: .video)
+            let assetVideoTracks = try await asset.loadTracks(withMediaType: .video)
 
-            if let sourceVideo = videoTracks.first {
-                if sharedVideoTrack == nil {
-                    sharedVideoTrack = composition.addMutableTrack(
+            if let sourceVideo = assetVideoTracks.first {
+                // Materialise composition tracks lazily up to the target
+                // index. We add at most 2 tracks today (M2 needs index 0
+                // and 1); M3 will extend this for PIP / overlay lanes.
+                while videoTracks.count <= targetTrackIndex {
+                    if let track = composition.addMutableTrack(
                         withMediaType: .video,
                         preferredTrackID: kCMPersistentTrackID_Invalid
-                    )
+                    ) {
+                        videoTracks.append(track)
+                    } else {
+                        break
+                    }
                 }
+                guard videoTracks.indices.contains(targetTrackIndex) else { return }
+                let destinationTrack = videoTracks[targetTrackIndex]
 
                 if let segments = speedSegments {
                     // Speed ramp: insert each piecewise sub-segment and
@@ -865,14 +898,14 @@ struct CompositionBuilder: Sendable {
                         segments: segments,
                         clip: clip,
                         sourceTrack: sourceVideo,
-                        compositionTrack: sharedVideoTrack,
+                        compositionTrack: destinationTrack,
                         compositionStart: startCMTime
                     )
                 } else {
-                    try sharedVideoTrack?.insertTimeRange(sourceCMRange, of: sourceVideo, at: startCMTime)
+                    try destinationTrack.insertTimeRange(sourceCMRange, of: sourceVideo, at: startCMTime)
                     if needsScale {
                         let insertedRange = CMTimeRange(start: startCMTime, duration: sourceCMRange.duration)
-                        sharedVideoTrack?.scaleTimeRange(insertedRange, toDuration: displayDuration)
+                        destinationTrack.scaleTimeRange(insertedRange, toDuration: displayDuration)
                     }
                 }
 
@@ -1017,6 +1050,45 @@ struct CompositionBuilder: Sendable {
         return last.multiplier
     }
 
+    // MARK: - Track allocation (#65 M2)
+
+    /// Assigns each video clip to a composition video-track index (0 or
+    /// 1) so adjacent crossfade pairs end up on different tracks. A
+    /// classic two-colouring of the clip sequence: same colour as
+    /// predecessor unless the predecessor's `transitionToNext` is a
+    /// crossfade *and* the clips abut, in which case we flip.
+    ///
+    /// Audio / overlay / caption / sticker / filter tracks aren't
+    /// returned here — those don't share the video lanes. They're not
+    /// looked up via this map and continue to allocate their own
+    /// composition tracks lazily inside `insertClip`.
+    fileprivate static func planVideoTrackAllocation(project: Project) -> [Clip.ID: Int] {
+        var allocation: [Clip.ID: Int] = [:]
+        for track in project.timeline.tracks where track.kind == .video && !track.isHidden {
+            let sorted = track.clips.sorted { $0.timeRange.start < $1.timeRange.start }
+            var lastTrack = 0
+            for (idx, clip) in sorted.enumerated() {
+                if idx == 0 {
+                    allocation[clip.id] = 0
+                    lastTrack = 0
+                    continue
+                }
+                let prev = sorted[idx - 1]
+                let prevTrack = allocation[prev.id] ?? 0
+                let abuts = abs(clip.timeRange.start - prev.timeRange.end) < 0.1
+                if let transition = prev.transitionToNext,
+                   transition.kind == .crossfade,
+                   abuts {
+                    lastTrack = 1 - prevTrack
+                } else {
+                    lastTrack = prevTrack
+                }
+                allocation[clip.id] = lastTrack
+            }
+        }
+        return allocation
+    }
+
     // MARK: - Crossfade pre-render (issue #1)
 
     /// Composition-side instructions for one crossfade pair. The lead
@@ -1146,23 +1218,30 @@ struct CompositionBuilder: Sendable {
         }
     }
 
-    /// Append a rendered transition `.mov` onto the shared video track
-    /// at the planned composition time. Pulled out so the main loop
-    /// stays readable.
+    /// Append a rendered transition `.mov` onto the leading clip's
+    /// composition track at the planned composition time. Pulled out
+    /// so the main loop stays readable.
     fileprivate static func appendTransitionMov(
         insert: TransitionInsert,
         into composition: AVMutableComposition,
-        sharedVideoTrack: inout AVMutableCompositionTrack?
+        videoTracks: inout [AVMutableCompositionTrack],
+        targetTrackIndex: Int
     ) async throws {
         let asset = AVURLAsset(url: insert.url)
-        let videoTracks = try await asset.loadTracks(withMediaType: .video)
-        guard let track = videoTracks.first else { return }
-        if sharedVideoTrack == nil {
-            sharedVideoTrack = composition.addMutableTrack(
+        let assetTracks = try await asset.loadTracks(withMediaType: .video)
+        guard let track = assetTracks.first else { return }
+        while videoTracks.count <= targetTrackIndex {
+            if let newTrack = composition.addMutableTrack(
                 withMediaType: .video,
                 preferredTrackID: kCMPersistentTrackID_Invalid
-            )
+            ) {
+                videoTracks.append(newTrack)
+            } else {
+                return
+            }
         }
+        guard videoTracks.indices.contains(targetTrackIndex) else { return }
+        let destination = videoTracks[targetTrackIndex]
         let assetDuration = try await asset.load(.duration).seconds
         let actualDuration = min(assetDuration, insert.duration)
         let range = CMTimeRange(
@@ -1170,7 +1249,7 @@ struct CompositionBuilder: Sendable {
             duration: CMTime(seconds: actualDuration, preferredTimescale: 600)
         )
         let at = CMTime(seconds: insert.compositionStart, preferredTimescale: 600)
-        try sharedVideoTrack?.insertTimeRange(range, of: track, at: at)
+        try destination.insertTimeRange(range, of: track, at: at)
     }
 
     fileprivate static func insertSpeedRampedSegments(
