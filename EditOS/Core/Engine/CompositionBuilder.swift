@@ -365,10 +365,15 @@ struct CompositionBuilder: Sendable {
 
         // #65 M1: per-frame work moved into `EditorCompositor`. We
         // build a single `EditorCompositionInstruction` covering the
-        // whole composition (M2 will split per time range), wire the
-        // custom compositor class, and return a manually-built
+        // whole composition (M2 step 3 will split per time range);
+        // wire the custom compositor class and return a manually-built
         // `AVMutableVideoComposition`.
-        guard let firstVideoTrack = videoTracks.first else { return nil }
+        //
+        // `videoTracks` (loaded above off the asset) already gives us
+        // every video track on the AVAsset — when the caller passes
+        // an AVMutableComposition (which is-a AVAsset), that includes
+        // both step-2-allocated composition tracks.
+        guard !videoTracks.isEmpty else { return nil }
         let durationCM: CMTime
         do {
             durationCM = try await asset.load(.duration)
@@ -376,15 +381,20 @@ struct CompositionBuilder: Sendable {
             Self.log.error("Failed to load composition duration: \(String(describing: error), privacy: .public)")
             return nil
         }
-        // M1-style single-layer fallback used when M2's per-range
-        // instructions weren't synthesised (e.g. no crossfade pairs in
-        // the project). M2 will emit per-range instructions when
-        // crossfade live blending is in flight; this single-layer
-        // shape stays as the steady-state for projects with no
-        // multi-layer activity.
+        // Every video composition track gets a layer so the compositor
+        // can see all of them. Most frames will have content on only
+        // one track (alternating allocation from step 2 puts crossfade
+        // pairs on different tracks but they don't overlap in time
+        // while the cache `.mov` still fills the gap). Step 3 will
+        // emit per-time-range instructions with proper opacity ramps;
+        // until then this single-instruction fallback at constant
+        // opacity 1.0 keeps every track visible at the right time.
+        let allLayers: [LayerInstruction] = videoTracks.map {
+            LayerInstruction(trackID: $0.trackID, opacityRamp: nil)
+        }
         let instruction = EditorCompositionInstruction(
             timeRange: CMTimeRange(start: .zero, duration: durationCM),
-            layers: [LayerInstruction(trackID: firstVideoTrack.trackID, opacityRamp: nil)],
+            layers: allLayers,
             canvasSize: canvasSize,
             clipTransforms: clipTransforms,
             fades: fades,
