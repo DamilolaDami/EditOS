@@ -12,6 +12,11 @@ final class EditorViewModel {
     var selectedTool: ToolCategory = .media
     var isLibraryVisible: Bool = true
     var isInspectorVisible: Bool = true
+    /// Active workspace preset. Drives the top-bar picker's chip and
+    /// the menu-item checkmarks; updated by `applyWorkspace`. Manual
+    /// panel toggles don't change this — the picker just records "the
+    /// last preset the user explicitly chose."
+    var currentWorkspace: Workspace = .editing
     var zoom: Double = 1.0
     /// Magnet-on/off — when off, dragging clips skips edge-snap completely.
     var snapEnabled: Bool = true
@@ -91,10 +96,10 @@ final class EditorViewModel {
     private(set) var saveStatus: SaveStatus = .idle
 
     /// Debounce window — bursts of edits inside this window collapse into
-    /// a single disk write. 0.8s is small enough that a force-quit one
-    /// second after the last edit loses < 1s of work, large enough that a
-    /// fast trim drag doesn't hammer SwiftData on every gesture tick.
-    private let saveDebounce: TimeInterval = 0.8
+    /// a single disk write. Seeded from `PreferencesStore.autoSaveDebounce`
+    /// by `EditorView`; settable so the General settings tab can change
+    /// the window live without an editor reopen.
+    var saveDebounce: TimeInterval = 0.8
 
     private var pendingSaveTask: Task<Void, Never>?
     /// Latest persist block. Each `scheduleSave` call replaces it so the
@@ -241,6 +246,20 @@ final class EditorViewModel {
 
     func toggleInspector() {
         isInspectorVisible.toggle()
+    }
+
+    /// Apply a workspace preset — flips panel visibility flags and
+    /// optionally swaps the library tab. Always resets to the preset's
+    /// defaults, so re-selecting the current workspace is the gesture
+    /// for "undo my manual tweaks and snap back to the layout."
+    func applyWorkspace(_ workspace: Workspace) {
+        currentWorkspace = workspace
+        let layout = workspace.layout
+        isLibraryVisible = layout.libraryVisible
+        isInspectorVisible = layout.inspectorVisible
+        if let tab = layout.preferredLibraryTab {
+            selectedTool = tab
+        }
     }
 
     // MARK: - Library import

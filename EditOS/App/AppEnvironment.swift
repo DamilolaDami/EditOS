@@ -22,6 +22,8 @@ final class AppEnvironment {
     let recorder: RecorderCoordinator
     let recordingsLibrary: RecordingsLibrary
     let roughCutEngine: RoughCutEngine
+    let shortcuts: ShortcutStore
+    let preferences: PreferencesStore
 
     /// Wired up from `EditOSApp` so any non-View context (e.g. the
     /// screen-recorder coordinator's `NSWindow` callbacks) can request
@@ -67,6 +69,8 @@ final class AppEnvironment {
         self.recorder = RecorderCoordinator()
         self.recordingsLibrary = RecordingsLibrary()
         self.roughCutEngine = RoughCutEngine()
+        self.shortcuts = ShortcutStore()
+        self.preferences = PreferencesStore()
         self.recorder.attach(environment: self)
         self.recordingsLibrary.refresh()
     }

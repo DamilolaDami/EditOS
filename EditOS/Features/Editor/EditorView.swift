@@ -9,6 +9,14 @@ struct EditorView: View {
         _model = State(initialValue: EditorViewModel(project: project, resolver: resolver))
     }
 
+    /// Seed model state from user preferences before the first render
+    /// so a fresh editor honours the General → Defaults tab without
+    /// the user having to interact first.
+    private func applyPreferenceDefaults() {
+        model.snapEnabled = environment.preferences.snapEnabledByDefault
+        model.saveDebounce = environment.preferences.autoSaveDebounce
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             EditorTopBar(model: model)
@@ -17,17 +25,27 @@ struct EditorView: View {
                 if model.isLibraryVisible {
                     LibraryPanel(model: model)
                         .frame(width: 280)
+                        // Slide + fade so workspace switches feel
+                        // intentional. Toolbar + preview stay put
+                        // because they're never conditionally hidden.
+                        .transition(.move(edge: .leading).combined(with: .opacity))
                 }
                 PreviewPanel(model: model)
                     .frame(maxWidth: .infinity)
                 if model.isInspectorVisible {
                     InspectorPanel(model: model)
                         .frame(width: 320)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
             .padding(.horizontal, theme.spacing.sm)
             .padding(.top, theme.spacing.sm)
             .frame(maxHeight: .infinity)
+            // Tween panel visibility off `currentWorkspace`. The
+            // toggle-on-the-fly notifications (⌘⌥L / ⌘⌥I) drive their
+            // mutations through `withAnimation` blocks instead, so
+            // manual toggles also animate without double-firing here.
+            .animation(.easeInOut(duration: 0.22), value: model.currentWorkspace)
 
             TimelinePanel(model: model)
                 .padding(theme.spacing.sm)
@@ -37,6 +55,12 @@ struct EditorView: View {
         .focusedSceneValue(\.editorModel, model)
         .task(id: model.project.id) {
             await model.reloadComposition()
+        }
+        .onAppear {
+            applyPreferenceDefaults()
+        }
+        .onChange(of: environment.preferences.autoSaveDebounce) { _, newValue in
+            model.saveDebounce = newValue
         }
         // Persist project edits (trim, move, delete, mute, cover, etc.). The
         // model coalesces bursts into a single trailing-edge write so a
@@ -55,10 +79,14 @@ struct EditorView: View {
             Task { await model.deleteSelectedClip() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .editorToggleInspector)) { _ in
-            model.toggleInspector()
+            withAnimation(.easeInOut(duration: 0.22)) {
+                model.toggleInspector()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .editorToggleLibrary)) { _ in
-            model.toggleLibrary()
+            withAnimation(.easeInOut(duration: 0.22)) {
+                model.toggleLibrary()
+            }
         }
     }
 }
