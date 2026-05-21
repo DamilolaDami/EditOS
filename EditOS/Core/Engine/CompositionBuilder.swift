@@ -202,17 +202,6 @@ struct CompositionBuilder: Sendable {
         )
     }
 
-    /// Per-clip preferredTransform record. Used by the CIFilter handler to
-    /// orient each clip's raw source pixels correctly without setting a
-    /// single transform on the shared video track (which would force every
-    /// clip into the first clip's orientation).
-    struct ClipVideoTransform: Sendable {
-        let start: TimeInterval
-        let end: TimeInterval
-        let transform: CGAffineTransform
-        let naturalSize: CGSize
-    }
-
     /// Builds the master `AVVideoComposition` that drives both playback and
     /// export. Three things happen per frame:
     ///   1. The source video is aspect-fit centered into the project's
@@ -241,35 +230,8 @@ struct CompositionBuilder: Sendable {
         // Pre-build overlay CIImages with canvas positions baked in. Done
         // up-front so the per-frame hot path is just composite calls — never
         // disk I/O, never string rasterisation. Animated GIFs return a
-        // multi-frame `RenderedOverlay`; the handler picks the right frame
-        // based on `compositionTime - clip.start`.
-        struct OverlayInstance: Sendable {
-            let start: TimeInterval
-            let end: TimeInterval
-            let frames: [CIImage]
-            let durations: [TimeInterval]
-            /// GIFs and animated stickers loop forever — text animations
-            /// don't. When `loops == false`, the playhead latches onto
-            /// the final frame once the durations are exhausted instead
-            /// of wrapping back to frame 0.
-            let loops: Bool
-
-            func image(at localTime: TimeInterval) -> CIImage? {
-                guard let first = frames.first else { return nil }
-                guard frames.count > 1, !durations.isEmpty else { return first }
-                let loop = durations.reduce(0, +)
-                guard loop > 0 else { return first }
-                let t = loops
-                    ? localTime.truncatingRemainder(dividingBy: loop)
-                    : min(localTime, loop)
-                var elapsed: TimeInterval = 0
-                for (i, d) in durations.enumerated() {
-                    elapsed += d
-                    if t < elapsed { return frames[i] }
-                }
-                return frames.last
-            }
-        }
+        // multi-frame `RenderedOverlay`; the compositor picks the right
+        // frame based on `compositionTime - clip.start`.
         var overlays: [OverlayInstance] = []
         for track in project.timeline.tracks where !track.isHidden {
             // Only render overlay-style tracks; video / audio / filter
@@ -291,18 +253,9 @@ struct CompositionBuilder: Sendable {
             }
         }
 
-        // Snapshot fade-in / fade-out ranges per video clip so the handler
-        // can ramp opacity to / from black without walking the project tree.
-        struct FadeRange: Sendable {
-            let start: TimeInterval
-            let end: TimeInterval
-            let kind: FadeKind
-            /// RGB triplet (0…1) for the colour to dip *through*. Defaults
-            /// to black for `fadeIn` / `fadeOut`; transitions may override
-            /// to white (`dipToWhite`).
-            let dipColor: (r: Double, g: Double, b: Double)
-            enum FadeKind: Sendable { case `in`, out }
-        }
+        // Snapshot fade-in / fade-out ranges per video clip so the
+        // compositor can ramp opacity to / from black without walking
+        // the project tree on each frame.
         var fades: [FadeRange] = []
         for track in project.timeline.tracks where track.kind == .video && !track.isHidden {
             for clip in track.clips {
@@ -378,12 +331,6 @@ struct CompositionBuilder: Sendable {
 
         // Filter ranges — dedicated `.filter` tracks plus the legacy
         // per-video-clip filterPreset for older projects.
-        struct FilteredRange: Sendable {
-            let start: TimeInterval
-            let end: TimeInterval
-            let presetID: String
-            let intensity: Double
-        }
         var filters: [FilteredRange] = []
         for track in project.timeline.tracks where !track.isHidden {
             guard track.kind == .filter || track.kind == .video else { continue }
@@ -398,170 +345,37 @@ struct CompositionBuilder: Sendable {
             }
         }
 
-        let bgColor = CIColor(red: 0, green: 0, blue: 0, alpha: 1)
-        let canvasRect = CGRect(origin: .zero, size: canvasSize)
         let frameRate = max(1.0, project.canvas.frameRate)
 
+        // #65 M1: per-frame work moved into `EditorCompositor`. We
+        // build a single `EditorCompositionInstruction` covering the
+        // whole composition (M2 will split per time range), wire the
+        // custom compositor class, and return a manually-built
+        // `AVMutableVideoComposition`.
+        guard let firstVideoTrack = videoTracks.first else { return nil }
+        let durationCM: CMTime
         do {
-            // Use the mutable variant so we can override `renderSize` and
-            // `frameDuration` after construction — the read-only base type
-            // exposes them get-only.
-            let videoComp = try await AVMutableVideoComposition.videoComposition(with: asset) { request in
-                // Every frame ends here. The handler is best-effort: if any
-                // single composite step produces a degenerate image we
-                // drop back to a known-good fallback and still call finish.
-                // AVAsynchronousCIImageFilteringRequest.finish(with:)
-                // asserts `filteredImage != nil`, so the *last* line of
-                // defence is `safeFallback` — a freshly-built black canvas
-                // built fresh per frame so its lifetime is never in doubt.
-                let safeFallback = CIImage(color: bgColor).cropped(to: canvasRect)
-
-                func isValid(_ image: CIImage) -> Bool {
-                    let e = image.extent
-                    return !e.isNull
-                        && !e.isInfinite
-                        && !e.isEmpty
-                        && e.width > 0
-                        && e.height > 0
-                        && e.width.isFinite
-                        && e.height.isFinite
-                        && e.origin.x.isFinite
-                        && e.origin.y.isFinite
-                }
-
-                let t = request.compositionTime.seconds
-                let raw = request.sourceImage
-                let hasUsableSource = isValid(raw)
-
-                // Apply the active clip's source preferredTransform so
-                // portrait / landscape / rotated sources render in their
-                // intended orientation. Skipped entirely when the source
-                // frame has no usable extent (padded tail / between-clip
-                // gap) — there's nothing to orient.
-                var result = safeFallback
-                if hasUsableSource {
-                    let oriented: CIImage
-                    if let active = clipTransforms.first(where: { t >= $0.start && t < $0.end }) {
-                        let transformed = raw.transformed(by: active.transform)
-                        if isValid(transformed) {
-                            let bounds = transformed.extent
-                            let translated = transformed.transformed(by: CGAffineTransform(
-                                translationX: -bounds.origin.x,
-                                y: -bounds.origin.y
-                            ))
-                            oriented = isValid(translated) ? translated : raw
-                        } else {
-                            oriented = raw
-                        }
-                    } else {
-                        oriented = raw
-                    }
-
-                    let sourceExtent = oriented.extent
-                    let sourceSize = sourceExtent.size
-
-                    // Aspect-fit the source into the canvas. Guard the
-                    // divisor against degenerate dimensions.
-                    let safeWidth = max(1, sourceSize.width)
-                    let safeHeight = max(1, sourceSize.height)
-                    let scale = min(
-                        canvasSize.width / safeWidth,
-                        canvasSize.height / safeHeight
-                    )
-                    let scaledW = sourceSize.width * scale
-                    let scaledH = sourceSize.height * scale
-                    let tx = (canvasSize.width - scaledW) / 2 - sourceExtent.origin.x * scale
-                    let ty = (canvasSize.height - scaledH) / 2 - sourceExtent.origin.y * scale
-                    if scale.isFinite && tx.isFinite && ty.isFinite {
-                        var positioned = oriented
-                            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-                            .transformed(by: CGAffineTransform(translationX: tx, y: ty))
-
-                        // Apply active filter (if any) to the positioned
-                        // video only, so filter effects don't bleed into
-                        // the canvas background.
-                        if let active = filters.first(where: { t >= $0.start && t < $0.end }) {
-                            let filtered = FilterCatalog.apply(
-                                presetID: active.presetID,
-                                intensity: active.intensity,
-                                to: positioned
-                            )
-                            if isValid(filtered) {
-                                positioned = filtered
-                            }
-                        }
-
-                        if isValid(positioned) {
-                            let composited = positioned.composited(over: safeFallback)
-                            if isValid(composited) {
-                                result = composited
-                            }
-                        }
-                    }
-                }
-
-                // Fade / transition — coloured overlay with ramped alpha.
-                // The same machinery handles fadeIn/Out *and* cross-clip
-                // transitions (rendered as a dip-through-color for V1; a
-                // true pixel-blended crossfade is tracked separately).
-                // Multiple fades may overlap (e.g. one clip's transition
-                // out at the same time as another's transition in on a
-                // different track) so we composite each in turn.
-                for fade in fades where t >= fade.start && t < fade.end {
-                    let span = max(0.001, fade.end - fade.start)
-                    let progress = (t - fade.start) / span
-                    let alpha: Double = fade.kind == .in
-                        ? max(0, 1 - progress)
-                        : max(0, progress)
-                    guard alpha > 0.001 else { continue }
-                    let veilColor = CIColor(
-                        red: fade.dipColor.r,
-                        green: fade.dipColor.g,
-                        blue: fade.dipColor.b
-                    )
-                    let baseVeil = CIImage(color: veilColor).cropped(to: canvasRect)
-                    let matrix = CIFilter.colorMatrix()
-                    matrix.inputImage = baseVeil
-                    matrix.aVector = CIVector(x: 0, y: 0, z: 0, w: alpha)
-                    if let veil = matrix.outputImage, isValid(veil) {
-                        let veiled = veil.composited(over: result)
-                        if isValid(veiled) {
-                            result = veiled
-                        }
-                    }
-                }
-
-                // Overlays — text + stickers active at this timestamp.
-                for overlay in overlays where t >= overlay.start && t < overlay.end {
-                    let localTime = t - overlay.start
-                    guard let frame = overlay.image(at: localTime), isValid(frame) else { continue }
-                    let composited = frame.composited(over: result)
-                    if isValid(composited) {
-                        result = composited
-                    }
-                }
-
-                // Final crop. If anything along the way left us with a
-                // degenerate image, fall back to the always-valid fresh
-                // black canvas. We *never* want to hand AVFoundation a
-                // nil-backed image — it asserts filteredImage != nil and
-                // tears the process down.
-                let final: CIImage
-                if isValid(result) {
-                    let cropped = result.cropped(to: canvasRect)
-                    final = isValid(cropped) ? cropped : safeFallback
-                } else {
-                    final = safeFallback
-                }
-                request.finish(with: final, context: nil)
-            }
-            videoComp.renderSize = canvasSize
-            videoComp.frameDuration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
-            return videoComp
+            durationCM = try await asset.load(.duration)
         } catch {
-            Self.log.error("Failed to build video composition: \(String(describing: error), privacy: .public)")
+            Self.log.error("Failed to load composition duration: \(String(describing: error), privacy: .public)")
             return nil
         }
+        let instruction = EditorCompositionInstruction(
+            timeRange: CMTimeRange(start: .zero, duration: durationCM),
+            trackIDs: [firstVideoTrack.trackID],
+            canvasSize: canvasSize,
+            clipTransforms: clipTransforms,
+            fades: fades,
+            filters: filters,
+            overlays: overlays
+        )
+
+        let videoComp = AVMutableVideoComposition()
+        videoComp.customVideoCompositorClass = EditorCompositor.self
+        videoComp.instructions = [instruction]
+        videoComp.renderSize = canvasSize
+        videoComp.frameDuration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
+        return videoComp
     }
 
     // MARK: - Overlay rasterisation
